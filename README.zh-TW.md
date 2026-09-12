@@ -54,14 +54,14 @@ cd omp-orchestration
 ```bash
 RUN=$(scripts/new_run.sh add-auth-cache)
 scripts/agents.sh --list
-scripts/capacity.sh medium
+scripts/capacity.sh --engine omp medium
 
 scripts/agent.sh --engine omp --run-dir "$RUN" --label cache \
   --cwd /path/to/repo --worktree --permission workspace-write \
   --tier deep --timeout 1800 --stall 300 \
   --prompt-file "$RUN/agents/cache/prompt.md" --schema "$RUN/schema/impl.json"
 
-scripts/dispatch.sh --run-dir "$RUN" --jobs "$RUN/jobs.jsonl" --weight medium
+scripts/dispatch.sh --engine omp --run-dir "$RUN" --jobs "$RUN/jobs.jsonl" --weight medium
 scripts/watch.sh "$RUN" --timeout 120 --peek
 scripts/verify.sh "$RUN" cache --check "pytest -q"
 scripts/merge.sh --run-dir "$RUN" --repo /path/to/repo --into main --check "pytest -q"

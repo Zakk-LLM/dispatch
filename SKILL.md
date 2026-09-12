@@ -1,6 +1,6 @@
 ---
 name: omp
-description: Drive the omp (oh-my-pi) CLI as a fleet of worker agents while you stay the orchestrator and reviewer. Use when a task is large enough to split across parallel workers — feature implementation, refactors, bug hunts, test writing, documentation drafting, research, multi-file audits — or whenever the user asks to delegate work to omp. You write the plan, dispatch scoped agents, supervise, review every diff yourself, and own the commit, merge, and deploy steps that workers are never allowed to touch. Sibling of the `codex` and `opencode` skills: same workflow, same run directory, different engine. omp's `read-only` grants no `bash`, so an audit that must run a check does not belong on this engine.
+description: Drive the omp (oh-my-pi) CLI as a fleet of worker agents while you stay the orchestrator and reviewer. Use when a task is large enough to split across parallel workers — feature implementation, refactors, bug hunts, test writing, documentation drafting, research, multi-file audits — or whenever the user asks to delegate work to omp. You write the plan, dispatch scoped agents, supervise, review every diff yourself, and own the commit, merge, and deploy steps that workers are never allowed to touch. Sibling of the `codex` and `opencode` skills: same workflow, same run directory, different engine. omp's `read-only` grants no `bash`, so an audit that must run a check does not belong on this engine. Codex's `read-only` sandbox runs any command while the kernel blocks writes.
 ---
 
 # omp Orchestration
@@ -146,7 +146,7 @@ Read [the omp engine page](references/engines/omp.md) for the tables, flags, and
 ### 5. Dispatch
 
 ```sh
-"$OMP_SKILL/scripts/dispatch.sh" --run-dir "$RUN" --jobs "$RUN/jobs.jsonl" \
+"$OMP_SKILL/scripts/dispatch.sh" --engine omp --run-dir "$RUN" --jobs "$RUN/jobs.jsonl" \
   --weight medium --max 4        # --dry-run prints the commands first
 ```
 
@@ -232,3 +232,5 @@ confirm with the user before anything outward-facing.
 - [references/troubleshooting.md](references/troubleshooting.md) — failure modes and recovery
 - [references/engines/omp.md](references/engines/omp.md) — omp tiers, profiles, flags, and limits
 - [references/engines/evidence-omp.md](references/engines/evidence-omp.md) — the measurements behind these defaults
+- [references/engines/codex.md](references/engines/codex.md) — Codex tiers, sandboxes, flags, limits, and troubleshooting
+- [references/engines/evidence-codex.md](references/engines/evidence-codex.md) — the measurements behind the Codex defaults
