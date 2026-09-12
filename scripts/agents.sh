@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Machine-wide view of the opencode agents this wrapper is running, so a second orchestrator window can
-# see what a first one started. The registry is the source of truth; process scanning only
-# reports strays, because an idle omp TUI, a zombie, or an unrelated program named opencode must
-# never be counted as a running agent.
+# Machine-wide view of every supported agent, so a second orchestrator window can see what a
+# first one started. Engine-specific registry directories are the source of truth; process
+# scanning only reports strays, because an idle engine TUI, a zombie, or an unrelated program
+# with the same name must never be counted as a running agent.
 set -uo pipefail
 
 REG=${OMP_REGISTRY_DIR:-${XDG_RUNTIME_DIR:-/tmp}/omp-agents}
@@ -22,11 +22,12 @@ Usage: agents.sh [--list | --count | --prune | --slots]
   --prune   drop entries whose process is gone
   --slots   free slots against OMP_MAX_AGENTS (default 5)
 
-Internal, used by agent.sh --engine omp:
+Internal, used by the engine adapters and worktrees.sh:
   --register PID FILE      register a running agent, metadata read from FILE (JSON)
   --unregister PID
+  --cwd-live DIR           print yes when any engine has a live agent in DIR, otherwise no
 
-Registry directory: $OMP_REGISTRY_DIR, or $XDG_RUNTIME_DIR/omp-agents.
+Registry directories: $XDG_RUNTIME_DIR/{omp,codex,opencode}-agents, with per-engine overrides.
 EOF
 }
 
@@ -48,11 +49,17 @@ PY
     ;;
   --unregister)
     rm -f "$REG/${2:?pid}.json" ;;
-  --count|--list|--prune|--slots)
+  --count|--list|--prune|--slots|--cwd-live)
     ACTION=$1
     ENGINE_FILTER=
-    [ "${2:-}" = "--engine" ] && ENGINE_FILTER=${3:-}
-    AGENT_ENGINE_FILTER="$ENGINE_FILTER" python3 - "$REG" "$ACTION" "${AGENT_MAX_AGENTS:-${OMP_MAX_AGENTS:-5}}" <<'PY'
+    CWD_TARGET=
+    if [ "$ACTION" = --cwd-live ]; then
+      CWD_TARGET=${2:?directory}
+    elif [ "${2:-}" = "--engine" ]; then
+      ENGINE_FILTER=${3:-}
+    fi
+    AGENT_ENGINE_FILTER="$ENGINE_FILTER" AGENT_CWD_TARGET="$CWD_TARGET" \
+      python3 - "$REG" "$ACTION" "${AGENT_MAX_AGENTS:-${OMP_MAX_AGENTS:-5}}" <<'PY'
 import json, os, pathlib, sys, time
 reg, action, cap = pathlib.Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
 
@@ -96,14 +103,13 @@ def scan_unregistered(known):
         except OSError:
             continue
         argv = [a.decode(errors="replace") for a in argv]
-        # Both engines count: `codex exec` (alias `e`) and `opencode run`. Anything else with
-        # that name is a TUI or an unrelated program.
+        # Only agent subcommands count. A TUI or unrelated executable with the same basename
+        # does not occupy a wrapper quota, but every recognized engine remains visible for
+        # machine-wide liveness checks.
         if not argv:            # kernel threads have an empty cmdline
             continue
         sub = next((a for a in argv[1:] if not a.startswith("-")), None)
         engine = os.path.basename(argv[0])
-        # Three engines share the cap: `codex exec`, `opencode run`, and `omp -p`. An
-        # interactive session of any of them is not an agent and must not be counted.
         if engine == "codex" and sub in ("exec", "e"):
             pass
         elif engine == "opencode" and sub == "run":
@@ -117,25 +123,28 @@ def scan_unregistered(known):
         pid = int(entry.name)
         if state(pid) in (None, "Z") or descends_from(pid, known):
             continue
+        try:
+            cwd = str((entry / "cwd").resolve(strict=True))
+        except OSError:
+            cwd = "?"
         found.append({"pid": pid, "label": "(unregistered)",
-                      "tier": "?", "cwd": next((argv[i + 1] for i, a in enumerate(argv)
-                                                if a == "-C" and i + 1 < len(argv)), "?"),
+                      "tier": "?", "cwd": cwd,
                       "run_dir": "(started outside this wrapper)", "registered_at": None})
     return found
 
-# One machine, one quota: a sibling toolkit's agents count against the same cap.
-# A filter narrows the count to one engine, which is what a per-engine cap needs.
+# Registry directories define engine identity. A filter selects one engine; an unfiltered
+# machine view scans all three directories for liveness.
 engine_filter = os.environ.get("AGENT_ENGINE_FILTER") or ""
-registries = [reg] if engine_filter else [reg]
-runtime = reg.parent
-names = [f"{engine_filter}-agents"] if engine_filter else \
-        ["codex-agents", "opencode-agents", "omp-agents"]
+runtime = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+registry_by_engine = {
+    "omp": pathlib.Path(os.environ.get("OMP_REGISTRY_DIR", reg)),
+    "codex": pathlib.Path(os.environ.get("CODEX_REGISTRY_DIR", runtime / "codex-agents")),
+    "opencode": pathlib.Path(os.environ.get("OPENCODE_REGISTRY_DIR", runtime / "opencode-agents")),
+}
 if engine_filter:
-    registries = []
-for name in names:
-    other = runtime / name
-    if other.is_dir() and other not in registries:
-        registries.append(other)
+    registries = [registry_by_engine.get(engine_filter, runtime / f"{engine_filter}-agents")]
+else:
+    registries = list(dict.fromkeys(registry_by_engine.values()))
 
 live, stale = [], []
 for f in sorted(f for r in registries for f in r.glob("*.json")):
@@ -154,11 +163,14 @@ for f in stale:
     try: f.unlink()
     except OSError: pass
 
-# Every counter uses the same set, so --slots and capacity.sh cannot disagree.
+# Every action derives its result from the same live-process set.
 live += scan_unregistered({d["pid"] for d in live})
 
 if action == "--count":
     print(len(live))
+elif action == "--cwd-live":
+    target = os.path.realpath(os.environ["AGENT_CWD_TARGET"])
+    print("yes" if any(os.path.realpath(str(d.get("cwd", ""))) == target for d in live) else "no")
 elif action == "--slots":
     print(max(0, cap - len(live)))
     print(f"registered={len(live)} cap={cap} pruned={len(stale)}", file=sys.stderr)

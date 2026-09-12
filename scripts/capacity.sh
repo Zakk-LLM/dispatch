@@ -11,7 +11,7 @@ ENV_FILE=${AGENT_ORCHESTRATION_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/agent-orch
 
 usage() {
   cat <<'EOF'
-Usage: capacity.sh [light|medium|heavy] [--per-agent-mb N]
+Usage: capacity.sh --engine omp|codex|opencode [light|medium|heavy] [--per-agent-mb N]
 
   light   read-only reading, search, drafting            (~400 MB/agent)
   medium  edits plus a test file or a linter run         (~1200 MB/agent)
@@ -20,32 +20,51 @@ Usage: capacity.sh [light|medium|heavy] [--per-agent-mb N]
 Prints the suggested concurrency and the numbers it came from. Override the memory estimate
 with --per-agent-mb when you know what the workload actually costs.
 
-opencode agents started by other sessions or other terminals are counted: the answer never
-exceeds OMP_MAX_AGENTS minus the omp agents already running. omp is not rate limited here, so
-that cap exists for the machine and the reviewer rather than for a quota; the codex and opencode
-toolkits keep their own shared cap.
+OMP uses OMP_MAX_AGENTS and counts OMP agents. Codex and OpenCode use AGENT_MAX_AGENTS
+and count both metered engines in their shared pool.
 EOF
 }
 
-WEIGHT=${1:-medium}
+ENGINE=; WEIGHT=medium; PER=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --engine) [ $# -ge 2 ] || { echo "missing engine after --engine" >&2; exit 2; }
+      ENGINE=$2; shift 2 ;;
+    --per-agent-mb) [ $# -ge 2 ] || { echo "--per-agent-mb needs a value" >&2; exit 2; }
+      PER=$2; shift 2 ;;
+    light|medium|heavy) WEIGHT=$1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+[ -n "$ENGINE" ] || { echo "--engine is required" >&2; usage >&2; exit 2; }
+case "$ENGINE" in omp|codex|opencode) ;; *) echo "unsupported engine: $ENGINE" >&2; exit 2 ;; esac
 case "$WEIGHT" in
-  light) PER=400; CPU_DIV=1 ;;
-  medium) PER=1200; CPU_DIV=2 ;;
-  heavy) PER=4000; CPU_DIV=4 ;;
-  -h|--help) usage; exit 0 ;;
-  *) echo "unknown weight: $WEIGHT" >&2; usage >&2; exit 2 ;;
+  light) DEFAULT_PER=400; CPU_DIV=1 ;;
+  medium) DEFAULT_PER=1200; CPU_DIV=2 ;;
+  heavy) DEFAULT_PER=4000; CPU_DIV=4 ;;
 esac
-[ "${2:-}" = "--per-agent-mb" ] && PER=${3:?--per-agent-mb needs a value}
+[ -n "$PER" ] || PER=$DEFAULT_PER
 
-# Agents started from other terminals or other orchestrator sessions count too: the API
-# quota and this machine are shared, and nothing else coordinates them.
-# One counter for the whole toolkit: agents.sh knows which processes are real agents,
-# which are an idle TUI or a zombie, and which are the wrapper's own child.
-# omp has no per-minute quota to protect, so its budget is its own: count omp agents against
-# the omp cap. The machine limits below still bind, and they are the real ceiling now.
-RUNNING=$("$(cd "$(dirname "$0")" && pwd)/agents.sh" --count --engine omp 2>/dev/null)
+# agents.sh owns process identity, zombie filtering, and wrapper-child de-duplication. Pool
+# selection stays here because OMP has an independent cap while Codex and OpenCode share one;
+# load, CPU, and memory limits below apply to every engine.
+AGENTS="$(cd "$(dirname "$0")" && pwd)/agents.sh"
+case "$ENGINE" in
+  omp)
+    RUNNING=$("$AGENTS" --count --engine omp 2>/dev/null)
+    GLOBAL_MAX=${OMP_MAX_AGENTS:-5}
+    QUOTA_NAME=OMP_MAX_AGENTS
+    ;;
+  codex|opencode)
+    CODEX_RUNNING=$("$AGENTS" --count --engine codex 2>/dev/null)
+    OPENCODE_RUNNING=$("$AGENTS" --count --engine opencode 2>/dev/null)
+    RUNNING=$(( ${CODEX_RUNNING:-0} + ${OPENCODE_RUNNING:-0} ))
+    GLOBAL_MAX=${AGENT_MAX_AGENTS:-5}
+    QUOTA_NAME=AGENT_MAX_AGENTS
+    ;;
+esac
 RUNNING=${RUNNING:-0}
-GLOBAL_MAX=${OMP_MAX_AGENTS:-${AGENT_MAX_AGENTS:-5}}
 FREE=$(( GLOBAL_MAX - RUNNING ))
 [ "$FREE" -lt 0 ] && FREE=0
 
@@ -73,11 +92,11 @@ CEILING=${AGENT_CONCURRENCY_CEILING:-8}
 [ "$N" -gt "$FREE" ] && N=$FREE
 
 printf '%s\n' "$N"
-printf 'weight=%s per-agent=%sMB cores=%s avail=%sMB load=%s cpu-cap=%s mem-cap=%s running=%s/%s free=%s%s\n' \
-  "$WEIGHT" "$PER" "$CORES" "$AVAIL_MB" "$LOAD" "$BY_CPU" "$BY_MEM" "$RUNNING" "$GLOBAL_MAX" "$FREE" \
+printf 'engine=%s weight=%s per-agent=%sMB cores=%s avail=%sMB load=%s cpu-cap=%s mem-cap=%s running=%s/%s free=%s%s\n' \
+  "$ENGINE" "$WEIGHT" "$PER" "$CORES" "$AVAIL_MB" "$LOAD" "$BY_CPU" "$BY_MEM" "$RUNNING" "$GLOBAL_MAX" "$FREE" \
   "$([ "$BUSY" = 1 ] && echo ' (machine busy: halved)')" >&2
 if [ "$N" = 0 ]; then
-  printf 'no free slot: %s omp agents already running (OMP_MAX_AGENTS=%s)\n' \
-    "$RUNNING" "$GLOBAL_MAX" >&2
+  printf 'no free slot: %s agents already running in the %s pool (%s=%s)\n' \
+    "$RUNNING" "$ENGINE" "$QUOTA_NAME" "$GLOBAL_MAX" >&2
 fi
 exit 0

@@ -16,8 +16,8 @@ while [ $# -gt 0 ]; do
   fi
 done
 
-[ -n "$ENGINE" ] || { echo "missing engine: set DISPATCH_ENGINE or pass --engine omp" >&2; exit 2; }
+[ -n "$ENGINE" ] || { echo "missing engine: set DISPATCH_ENGINE or pass --engine omp|codex" >&2; exit 2; }
 case "$ENGINE" in
-  omp) exec "$HERE/engines/$ENGINE/agent.sh" "${ARGS[@]}" ;;
+  omp|codex) exec "$HERE/engines/$ENGINE/agent.sh" "${ARGS[@]}" ;;
   *) echo "unsupported engine: $ENGINE" >&2; exit 2 ;;
 esac

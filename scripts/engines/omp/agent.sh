@@ -223,7 +223,7 @@ if [ "$ADMISSION" != off ]; then
   # honours its own cap: sharing the metered engines' slots would let it starve them.
   SLOTS="$SLOTS/omp"
   mkdir -p "$SLOTS" 2>/dev/null
-  MAXA=${OMP_MAX_AGENTS:-${AGENT_MAX_AGENTS:-5}}
+  MAXA=${OMP_MAX_AGENTS:-5}
   SLOT_FD=; WAITED=0
   while [ -z "$SLOT_FD" ]; do
     for i in $(seq 1 "$MAXA"); do
@@ -233,7 +233,7 @@ if [ "$ADMISSION" != off ]; then
     done
     [ -n "$SLOT_FD" ] && break
     if [ "$ADMISSION" = refuse ]; then
-      echo "no free agent slot: $MAXA already running machine-wide (AGENT_MAX_AGENTS)" >&2
+      echo "no free agent slot: $MAXA already running machine-wide (OMP_MAX_AGENTS)" >&2
       "$HERE/../../agents.sh" --list >&2
       exit 3
     fi
@@ -328,7 +328,7 @@ fi
 STARTED_JSON="$OUT/started.json"
 LABEL="$LABEL" CWD="$CWD" TIMEOUT="$TIMEOUT" STALL="$STALL" START="$START" PID="$AGENT_PID" \
   python3 -c 'import json, os, sys
-json.dump({"label": os.environ["LABEL"], "cwd": os.environ["CWD"],
+json.dump({"label": os.environ["LABEL"], "engine": "omp", "cwd": os.environ["CWD"],
            "pid": int(os.environ["PID"]), "started_at": int(os.environ["START"]),
            "timeout_s": int(os.environ["TIMEOUT"]), "stall_s": int(os.environ["STALL"]),
            "deadline": int(os.environ["START"]) + int(os.environ["TIMEOUT"])},
@@ -456,7 +456,7 @@ elif final:
 result = out / "result.json" if (out / "result.json").exists() else out / "last.txt"
 code = int(code)
 meta = {
-    "label": label, "cwd": cwd, "effort": thinking or "default", "sandbox": permission,
+    "label": label, "engine": "omp", "cwd": cwd, "effort": thinking or "default", "sandbox": permission,
     "model": model or None, "role": role or None, "resumed_from": resume or None,
     "exit_code": code, "duration_s": int(dur), "thread_id": session, "usage": usage,
     "result_file": str(result) if result.exists() else None,
