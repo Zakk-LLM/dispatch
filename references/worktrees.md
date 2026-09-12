@@ -13,7 +13,7 @@ clobbering into a merge you can inspect.
 ## Dispatching into worktrees
 
 ```sh
-"$OMP_SKILL/scripts/agent.sh" --engine omp --run-dir "$RUN" --label cache \
+"$DISPATCH_SKILL/scripts/agent.sh" --engine omp --run-dir "$RUN" --label cache \
   --cwd /path/to/repo --worktree --worktree-base main \
   --permission workspace-write --tier deep --timeout 3600 \
   --prompt-file "$RUN/agents/cache/prompt.md"
@@ -45,8 +45,8 @@ branch diff alone shows nothing. Look at the working tree, then let `merge.sh` c
 integrate it, or commit it yourself first.
 
 ```sh
-"$OMP_SKILL/scripts/worktrees.sh" "$RUN" --diff main   # branch diff plus uncommitted work
-"$OMP_SKILL/scripts/merge.sh" --run-dir "$RUN" --repo /path/to/repo --into main \
+"$DISPATCH_SKILL/scripts/worktrees.sh" "$RUN" --diff main   # branch diff plus uncommitted work
+"$DISPATCH_SKILL/scripts/merge.sh" --run-dir "$RUN" --repo /path/to/repo --into main \
   --check "pytest -q"                                          # commits, merges, verifies, rolls back
 ```
 
@@ -59,8 +59,8 @@ conflict" — the agent that wrote one side cannot see why the other side exists
 Worktrees, branches, and their build output persist until removed:
 
 ```sh
-"$OMP_SKILL/scripts/worktrees.sh" "$RUN" --list
-"$OMP_SKILL/scripts/worktrees.sh" "$RUN" --remove-merged main
+"$DISPATCH_SKILL/scripts/worktrees.sh" "$RUN" --list
+"$DISPATCH_SKILL/scripts/worktrees.sh" "$RUN" --remove-merged main
 ```
 
 Remove them once the work is merged or abandoned. A run directory full of stale worktrees is

@@ -219,3 +219,43 @@ The failed inquiry is recorded and is never re-dispatched automatically.
 `codex_status.sh` totals the token usage per run. When output tokens run high for the value
 returned, the usual causes are an effort level above what the task needs, a spec so vague the
 worker explores the repository first, or a missing schema letting it write an essay.
+
+## Hand over the skills the worker needs
+
+Naming a skill in the spec guarantees it is used. Codex 0.147 also instructs workers to use a
+skill whose description clearly matches the task, so a relevant skill may be applied without
+being named — naming it is how you make that deterministic. List what Codex can see:
+
+```sh
+ls "${CODEX_HOME:-$HOME/.codex}/skills"
+```
+
+When a listed skill covers the task — a writing standard, a repository workflow, a domain
+convention — put a `## Skills` block in the spec with the absolute path to its `SKILL.md` and
+the instruction to read it first. Skills installed for you are not automatically installed for
+Codex: if the one you rely on is missing from that directory, either paste its operative rules
+into the spec, or ask the user before installing it for Codex.
+
+Codex reads `AGENTS.override.md` and `AGENTS.md` from the worker's `--cwd` and above. It does
+not read `CLAUDE.md` unless that name is added to `project_doc_fallback_filenames` in the Codex
+config, so rules that live only in `CLAUDE.md` must be pasted into the spec.
+
+## Common task shapes
+
+In the original Codex-specific wording, `codex_merge.sh` below means the shared `merge.sh` for
+a Codex run.
+
+- **Feature**: one `read-only` `standard` agent maps the code, then `workspace-write` agents by
+  module, each in its own `--worktree`, then you merge with `codex_merge.sh` and review.
+- **Bug hunt**: parallel `read-only` agents with different lenses (correctness, boundaries,
+  concurrency, error paths), each returning a findings schema; you deduplicate, then dispatch
+  `cheap` or `standard` fixes for the confirmed ones only.
+- **README or docs**: a `read-only` agent collects the facts, a `workspace-write` agent drafts,
+  you verify every command and claim it makes. Apply the repository's writing rules yourself —
+  workers do not know them unless you paste them into the spec.
+- **Research and data collection**: `read-only` plus `--network`, always with a schema, plus a
+  requirement that every claim carries a source. Verify the sources; workers do fabricate them.
+- **Migration or sweep**: one `cheap` agent per file batch, identical spec, disjoint scopes,
+  one worktree each; merge in batches so a failure never rolls back the whole sweep.
+- **Auditing this or another skill**: `read-only` agents that must demonstrate each finding by
+  running something, with a schema that requires a failure scenario and a fix per finding.

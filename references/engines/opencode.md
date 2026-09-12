@@ -1,8 +1,34 @@
+# OpenCode engine reference
+
 Read this page for OpenCode tasks that depend on tier, variant, timeout, permission, or agent behavior.
 
 You need not read it for shared orchestration steps that do not depend on OpenCode-specific flags or profiles.
 
-# OpenCode engine reference
+## What opencode gives you that codex does not
+
+**Enforced prohibitions.** `--permission workspace-write` denies `git commit`, `push`, `rebase`,
+`checkout`, `reset`, `merge`, and the rest at the tool layer. In the codex skill those rules can
+only be written into the spec and hoped for; here the engine refuses them.
+
+**Named agent presets.** `--agent <name>` runs one of the agents defined in the user's opencode
+config, so a house style for "explore" or "plan" is reused instead of re-specified.
+
+**Session forking.** `--fork` branches an existing session instead of extending it: try a second
+approach from the same accumulated understanding without polluting the original thread.
+
+**Cost per run.** Every `step_finish` event carries `cost`, so `meta.json` records money as well
+as tokens.
+
+## What it costs you
+
+**No sandbox.** codex confines a worker with an OS-level sandbox; opencode has permission rules
+and nothing more. A `read-only` worker here is bounded by opencode's own tool layer, not by the
+kernel, so a permissive `bash` pattern is a real hole rather than a policy detail. Treat the
+permission profile as the whole boundary, and do not run untrusted work.
+
+**No schema enforcement.** opencode has no `--output-schema`. The wrapper appends the schema to
+the prompt and validates the final message afterwards, exiting 65 when it does not parse. The
+model is asked, not forced, so a schema failure is a real outcome you will occasionally see.
 
 ### 4. Pick the tier, the permission profile, and the limits
 

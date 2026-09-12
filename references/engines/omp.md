@@ -1,7 +1,41 @@
+# omp engine reference
+
 Read this page for omp tasks that depend on tier, thinking, timeout, permission, or tool-access behavior.
 You need not read it for shared orchestration steps that do not depend on omp-specific flags or profiles.
 
-# omp engine reference
+## What omp gives you that the others do not
+
+**A real cost figure.** Every assistant message carries `usage.cost` in dollars, so `meta.json`
+records what a run actually cost rather than a token count you have to price yourself. Measured:
+the same one-file fix cost $0.167 on the flagship and $0.0047 on the cheap model — a 35× spread
+that is invisible without this number.
+
+**Tool withholding as the boundary.** `--tools` is an allowlist, and a worker cannot call a tool
+it was not given. A `read-only` worker has no `write`, `edit`, or `bash` at all, which is
+stronger than a permission rule that says no.
+
+**Sessions inside the run.** `--session-dir` puts every session file in `<run>/sessions/`, so a
+run directory is self-contained and a resume needs no global state.
+
+**A built-in deadline.** `--max-time` stops the session cleanly from the inside; the external
+`timeout` is only the backstop for a hang.
+
+**Roles as files.** `--role <name>` appends an agent definition from `~/.omp/agent/agents/` to
+the system prompt, so a worker persona lives in one reusable file.
+
+## What it costs you
+
+**No sandbox.** Like opencode and unlike codex, there is no OS-level confinement: the tool
+allowlist is the entire boundary. Do not run untrusted work.
+
+**No schema enforcement.** Print mode cannot force a shape. The wrapper appends the schema to
+the prompt and validates the answer afterwards, exiting 65 and recording `schema_error` when it
+does not parse.
+
+**Search is not in the allowlist.** `--tools` accepts `read, grep, glob, lsp, yield, write,
+edit, bash, ast_edit` and a few experiment tools; there is no `web_search` among them. The
+`read` tool does take a URL, so a restricted worker can still fetch a page it is given, but a
+worker that must *search* needs `--permission full`, where MCP search tools are available.
 
 | `--tier` | `--thinking` | use for | `--timeout` |
 |----------|--------------|---------|-------------|

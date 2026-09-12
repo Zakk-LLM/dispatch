@@ -34,7 +34,7 @@ Specifically, none of these is a reason to accept:
 `verify.sh` mechanizes steps 2 and 3 and refuses to return `verified` when no check ran:
 
 ```sh
-"$OMP_SKILL/scripts/verify.sh" "$RUN" auth-cache \
+"$DISPATCH_SKILL/scripts/verify.sh" "$RUN" auth-cache \
   --check "pytest tests/test_auth.py -q" --check "ruff check src/"
 ```
 

@@ -42,6 +42,7 @@ ENGINES = {
     },
 }
 INTEGRATED_ENGINES = ("omp", "codex", "opencode")
+SKILL_NAME = "dispatch"
 
 # The evidence rules a read-only worker is given. They are the same on all three engines and
 # have already drifted once: a rule was added to one sibling's template and the other two kept
@@ -154,6 +155,9 @@ def check_entry(skill_path, readme_path, readme_zh_path):
     else:
         if name_of(fm) is None:
             bad.append("frontmatter has no name")
+        elif name_of(fm) != SKILL_NAME:
+            bad.append("frontmatter name is `%s`; the contract is `%s`" %
+                       (name_of(fm), SKILL_NAME))
         desc = description_of(fm)
         if desc is None:
             bad.append("frontmatter has no description")
@@ -164,19 +168,18 @@ def check_entry(skill_path, readme_path, readme_zh_path):
                     bad.append("description does not state %s's read-only execution boundary; "
                                "missing: %s" % (engine, boundary))
 
-    readme_specs = [
-        (readme_path, readmes[0], ENGINES["omp"]["readme"]["README.md"]),
-        (readme_zh_path, readmes[1], ENGINES["omp"]["readme"]["README.zh-TW.md"]),
-    ]
-    for path, body, needle in readme_specs:
-        if needle not in flat(body):
-            bad.append("%s does not say omp's profile names do not carry to the siblings; "
-                       "missing: %s" % (path, needle))
-
+    for engine in INTEGRATED_ENGINES:
+        for index, path in enumerate((readme_path, readme_zh_path)):
+            key = path.name
+            needle = ENGINES[engine]["readme"][key]
+            if needle not in flat(readmes[index]):
+                bad.append("%s does not state %s's cross-engine profile boundary; missing: %s" %
+                           (path, engine, needle))
     if report_findings(skill_path, bad):
         return 1
-    print("%s: contract intact — frontmatter, %d engine boundary, 2 README notes" %
-          (skill_path, len(INTEGRATED_ENGINES)))
+    print("%s: contract intact — name `%s`, %d engine boundaries, %d README notes" %
+          (skill_path, SKILL_NAME, len(INTEGRATED_ENGINES),
+           len(INTEGRATED_ENGINES) * len(readmes)))
     return 0
 
 
