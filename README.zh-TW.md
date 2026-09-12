@@ -4,6 +4,19 @@
 
 整套 skill 的路由表（什麼任務讀哪份）在 [zakk-workflow 的 README](https://github.com/Zakk-LLM/zakk-workflow/blob/main/README.zh-CN.md#与其他-skill-的边界)。
 
+<!-- skill-map -->
+## 總圖
+
+```text
+任務進來
+ ├─ 定結構 ─────▶ zakk-architecture ──介面取值──▶ web-ui
+ ├─ 一次改動 ───▶ zakk-maintain ─┬─ 計劃、落倉、門禁、報告 ─▶ zakk-workflow
+ │                              ├─ 判 diff ──────────────▶ zakk-review ─▶ zakk-workflow
+ │                              └─ 派工 ─────────────────▶ dispatch --engine omp | codex | opencode
+ └─ 任何中文 ───▶ chinese-skill（橫切，每份都讀）
+```
+<!-- /skill-map -->
+
 Dispatch 把工作分派給 omp、Codex 或 OpenCode 工作代理；協調者保留規劃、監督、審查、
 commit、merge 與發佈。三個引擎共用執行目錄、難度分級、依賴排序、審查閘門與原子整合，
 但各自保留存取邊界、模型控制、事件格式、逾時行為與 resume ID。使用時需要 Python 3.11

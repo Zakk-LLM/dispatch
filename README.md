@@ -4,6 +4,19 @@ English | [繁體中文](README.zh-TW.md)
 
 The routing table for the whole skill set — which skill to read for which task — lives in [zakk-workflow's README](https://github.com/Zakk-LLM/zakk-workflow#boundaries-with-the-sibling-skills).
 
+<!-- skill-map -->
+## Map
+
+```text
+a task arrives
+ ├─ structure ────▶ zakk-architecture ──interface values──▶ web-ui
+ ├─ one change ───▶ zakk-maintain ─┬─ plan, land, gates, report ─▶ zakk-workflow
+ │                                ├─ judge the diff ───────────▶ zakk-review ─▶ zakk-workflow
+ │                                └─ dispatch ─────────────────▶ dispatch --engine omp | codex | opencode
+ └─ any Chinese ──▶ chinese-skill (cross-cutting, read by every skill)
+```
+<!-- /skill-map -->
+
 Dispatch drives omp, Codex, or OpenCode workers while the orchestrator retains planning,
 supervision, review, commits, merges, and releases. Every engine uses the same run directory,
 difficulty tiers, dependency ordering, review gate, and atomic integration. The selected engine
