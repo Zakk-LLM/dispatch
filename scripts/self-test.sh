@@ -1006,6 +1006,13 @@ open(p, "w", encoding="utf-8").write(s.replace(old, "`read-only` grants no shell
 PY
 expect 1 "description without the boundary" python3 scripts/check-contract.py entry \
   "$TMP/w/SKILL.md" "$TMP/w/README.md" "$TMP/w/README.zh-TW.md"
+
+# The entry name is the loader identity, not a descriptive label.
+fresh || exit 2
+require_count 1 'name: dispatch' "$TMP/w/SKILL.md"
+sed -i 's/^name: dispatch$/name: omp/' "$TMP/w/SKILL.md"
+expect 1 "frontmatter has the old skill name" python3 scripts/check-contract.py entry \
+  "$TMP/w/SKILL.md" "$TMP/w/README.md" "$TMP/w/README.zh-TW.md"
 fresh || exit 2
 expect 0 "reflection trigger controls" python3 "$TMP/event-controls.py" "$TMP/w" triggers
 cat "$TMP/out"
@@ -1054,20 +1061,27 @@ require_count 1 '| `inspect` (default) | `build` | every command except destruct
 sed -i '/^| `inspect` (default) | `build` | every command except destructive and history-changing git; the edit tool is denied | audits, reviews, running tests and linters |$/d' "$page"
 expect 1 "OpenCode access profile is missing" python3 scripts/check-contract.py engine opencode "$page"
 
-# The README loses the sentence saying these profile names do not carry to the siblings.
-# Codex's README once said its read-only "reads only", contradicting its own SKILL.md; this
-# is the control for that class of regression.
-for r in README.md README.zh-TW.md; do
+# Each README must preserve every engine's cross-engine profile boundary.
+readme_control() {
+  r=$1
+  needle=$2
   fresh || exit 2
-  case "$r" in
-    README.md) needle="These profile names are omp's own." ;;
-    README.zh-TW.md) needle='這些設定檔名稱是 omp 自己的。' ;;
-  esac
   require_count 1 "$needle" "$TMP/w/$r"
-  sed -i "\|$needle|d" "$TMP/w/$r"
-  expect 1 "$r without the cross-engine note" python3 scripts/check-contract.py entry \
+  python3 - "$TMP/w/$r" "$needle" <<'PY'
+import sys
+path, needle = sys.argv[1:]
+body = open(path, encoding="utf-8").read()
+open(path, "w", encoding="utf-8").write(body.replace(needle, "", 1))
+PY
+  expect 1 "$r without cross-engine note: $needle" python3 scripts/check-contract.py entry \
     "$TMP/w/SKILL.md" "$TMP/w/README.md" "$TMP/w/README.zh-TW.md"
-done
+}
+readme_control README.md "These profile names are omp's own."
+readme_control README.md "the name does not carry to the siblings"
+readme_control README.md "These profile names are opencode's own."
+readme_control README.zh-TW.md '這些設定檔名稱是 omp 自己的。'
+readme_control README.zh-TW.md '這個名稱不能沿用到姊妹引擎'
+readme_control README.zh-TW.md '這些設定檔名稱是 opencode 自己的。'
 
 # An evidence rule drops out of the worker prompt template. This happened: one sibling gained
 # a rule and the other two kept the shorter list.
@@ -1093,6 +1107,95 @@ fresh || exit 2
 rm -f "$TMP/w/README.zh-TW.md"
 expect 2 "a README is missing" python3 scripts/check-contract.py entry \
   "$TMP/w/SKILL.md" "$TMP/w/README.md" "$TMP/w/README.zh-TW.md"
+
+# Exercise every install target under an isolated HOME. Each phase includes its own negative
+# ownership control so uninstall cannot remove another skill at the same destination.
+fresh || exit 2
+cat > "$TMP/install-controls.sh" <<'SH'
+#!/usr/bin/env sh
+set -eu
+root=$1
+tmp=$2
+phase=$3
+home=$tmp/home
+claude=$home/claude
+codex=$home/codex
+config=$home/config
+omp=$home/omp
+export HOME=$home CLAUDE_HOME=$claude CODEX_HOME=$codex XDG_CONFIG_HOME=$config OMP_CONFIG_DIR=$omp
+paths="$claude/skills/dispatch
+$codex/skills/dispatch
+$config/opencode/skills/dispatch
+$omp/skills/dispatch
+$home/.agents/skills/dispatch"
+
+reset_home() {
+  rm -rf "$home"
+  mkdir -p "$home"
+}
+
+all_absent() {
+  printf '%s\n' "$paths" | while IFS= read -r path; do
+    [ ! -e "$path" ] && [ ! -L "$path" ]
+  done
+}
+
+case "$phase" in
+  link)
+    reset_home
+    "$root/install.sh" --link >/dev/null
+    printf '%s\n' "$paths" | while IFS= read -r path; do
+      [ -L "$path" ]
+      [ "$(readlink "$path")" = "$root" ]
+    done
+    status=$("$root/install.sh" --status)
+    [ "$(printf '%s\n' "$status" | wc -l)" -eq 5 ]
+    for target in claude codex opencode omp agents; do
+      printf '%s\n' "$status" | grep -q "^$target"
+    done
+    "$root/install.sh" --uninstall >/dev/null
+    all_absent
+
+    "$root/install.sh" --link >/dev/null
+    foreign=$tmp/foreign-link
+    mkdir -p "$foreign"
+    rm "$home/.agents/skills/dispatch"
+    ln -s "$foreign" "$home/.agents/skills/dispatch"
+    "$root/install.sh" --uninstall >/dev/null 2>&1
+    printf '%s\n' "$paths" | sed '$d' | while IFS= read -r path; do
+      [ ! -e "$path" ] && [ ! -L "$path" ]
+    done
+    [ -L "$home/.agents/skills/dispatch" ]
+    [ "$(readlink "$home/.agents/skills/dispatch")" = "$foreign" ]
+    ;;
+  copy)
+    reset_home
+    "$root/install.sh" --copy >/dev/null
+    printf '%s\n' "$paths" | while IFS= read -r path; do
+      [ -d "$path" ]
+      grep -q '^name: dispatch$' "$path/SKILL.md"
+    done
+    "$root/install.sh" --uninstall >/dev/null
+    all_absent
+
+    "$root/install.sh" --copy >/dev/null
+    foreign="$home/.agents/skills/dispatch"
+    rm -rf "$foreign"
+    mkdir -p "$foreign"
+    printf '%s\n' '---' 'name: somebody-else' '---' > "$foreign/SKILL.md"
+    "$root/install.sh" --uninstall >/dev/null 2>&1
+    printf '%s\n' "$paths" | sed '$d' | while IFS= read -r path; do
+      [ ! -e "$path" ] && [ ! -L "$path" ]
+    done
+    grep -q '^name: somebody-else$' "$foreign/SKILL.md"
+    ;;
+esac
+SH
+chmod +x "$TMP/install-controls.sh"
+expect 0 "link install status and ownership lifecycle" \
+  "$TMP/install-controls.sh" "$TMP/w" "$TMP/install-link" link
+expect 0 "copy install ownership lifecycle" \
+  "$TMP/install-controls.sh" "$TMP/w" "$TMP/install-copy" copy
 
 # Shell syntax: the clean copy is green, an injected error is red.
 fresh || exit 2

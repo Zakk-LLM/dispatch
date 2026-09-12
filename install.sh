@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Install this skill for Claude Code, Codex, or OpenCode.
+# Install this skill for Claude Code, Codex, OpenCode, omp, or an Agents-compatible host.
 set -euo pipefail
 
 SOURCE=$(cd "$(dirname "$0")" && pwd)
-NAME=omp
+NAME=dispatch
 operation=install
 transport=link
 targets=()
 
 usage() {
   printf '%s\n' \
-    "Usage: ./install.sh [claude|codex|opencode|omp ...] [--copy|--link]" \
+    "Usage: ./install.sh [claude|codex|opencode|omp|agents ...] [--copy|--link]" \
     "       ./install.sh [targets ...] --status" \
     "       ./install.sh [targets ...] --uninstall" \
     "" \
-    "Default: symlink the skill for all four supported agents."
+    "Default: symlink the skill for all five supported targets."
 }
 
 for argument in "$@"; do
@@ -24,12 +24,12 @@ for argument in "$@"; do
     --status) operation=status ;;
     --uninstall) operation=uninstall ;;
     -h|--help) usage; exit 0 ;;
-    claude|codex|opencode|omp) targets+=("$argument") ;;
+    claude|codex|opencode|omp|agents) targets+=("$argument") ;;
     *) printf 'Unknown argument: %s\n' "$argument" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-[ "${#targets[@]}" -eq 0 ] && targets=(claude codex opencode omp)
+[ "${#targets[@]}" -eq 0 ] && targets=(claude codex opencode omp agents)
 
 skill_base() {
   case "$1" in
@@ -37,6 +37,7 @@ skill_base() {
     codex) printf '%s\n' "${CODEX_HOME:-$HOME/.codex}/skills" ;;
     opencode) printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills" ;;
     omp) printf '%s\n' "${OMP_CONFIG_DIR:-$HOME/.omp/agent}/skills" ;;
+    agents) printf '%s\n' "$HOME/.agents/skills" ;;
   esac
 }
 
@@ -55,10 +56,14 @@ for target in "${targets[@]}"; do
       ;;
     uninstall)
       if [ -L "$dest" ]; then
-        rm "$dest"; printf '%-9s removed link\n' "$target"
+        if [ "$(readlink "$dest")" = "$SOURCE" ] || [ "$dest" -ef "$SOURCE" ]; then
+          rm "$dest"; printf '%-9s removed link\n' "$target"
+        else
+          printf '%-9s left alone: %s is not this skill\n' "$target" "$dest" >&2
+        fi
       elif [ -d "$dest" ]; then
         # Refuse to delete a directory this installer did not create.
-        if [ -f "$dest/SKILL.md" ] && grep -q '^name: codex$' "$dest/SKILL.md"; then
+        if [ -f "$dest/SKILL.md" ] && grep -q "^name: $NAME\$" "$dest/SKILL.md"; then
           rm -rf "$dest"; printf '%-9s removed copy\n' "$target"
         else
           printf '%-9s left alone: %s is not this skill\n' "$target" "$dest" >&2
