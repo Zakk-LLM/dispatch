@@ -4,6 +4,12 @@ English | [繁體中文](README.zh-TW.md)
 
 The routing table for the whole skill set — which skill to read for which task — lives in [zakk-workflow's README](https://github.com/Zakk-LLM/zakk-workflow#boundaries-with-the-sibling-skills).
 
+Dispatch drives omp, Codex, or OpenCode workers while the orchestrator retains planning,
+supervision, review, commits, merges, and releases. Every engine uses the same run directory,
+difficulty tiers, dependency ordering, review gate, and atomic integration. The selected engine
+keeps its own access boundary, model controls, event format, timeout behavior, and resume IDs.
+Python 3.11 or newer and Bash are required, together with at least one configured engine CLI.
+
 <!-- skill-map -->
 ## Map
 
@@ -16,12 +22,6 @@ a task arrives
  └─ any Chinese ──▶ chinese-skill (cross-cutting, read by every skill)
 ```
 <!-- /skill-map -->
-
-Dispatch drives omp, Codex, or OpenCode workers while the orchestrator retains planning,
-supervision, review, commits, merges, and releases. Every engine uses the same run directory,
-difficulty tiers, dependency ordering, review gate, and atomic integration. The selected engine
-keeps its own access boundary, model controls, event format, timeout behavior, and resume IDs.
-Python 3.11 or newer and Bash are required, together with at least one configured engine CLI.
 
 ## Choose an engine
 
