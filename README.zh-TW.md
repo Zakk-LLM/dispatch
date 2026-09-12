@@ -22,6 +22,33 @@ commit、merge 與發佈。三個引擎共用執行目錄、難度分級、依�
 ```
 <!-- /skill-map -->
 
+## 流程
+
+<!-- skill-flow -->
+```text
+入口：工作大到可拆給平行工作代理，或使用者要求委派
+ │
+ ├─ 選引擎：omp 做不執行命令的調研與審查；Codex 做需執行命令的稽核；
+ │   OpenCode 用 read-only 規劃、用 inspect 執行命令
+ ├─ Preflight：agent.sh --engine <e> --help；agents.sh --list；
+ │   capacity.sh --engine <e>
+ ├─ 一 建立執行目錄
+ ├─ 二 按檔案歸屬拆分；在 PLAN.md 聲明順序；每個寫入者各用一個 worktree
+ ├─ 三 寫任務說明：範圍柵欄、可執行驗收、live notes、禁止項；
+ │      從 impact.sh 貼入回歸範圍
+ ├─ 四 選引擎、tier、設定檔和限額
+ ├─ 五 派發
+ ├─ 六 不空轉地監督；進程 90 分鐘封頂
+ ├─ 七 自己復查：讀 diff、核範圍、執行每條驗收和負控制
+ ├─ 八 修復輪與續跑：同引擎 resume；前提錯誤時重開
+ └─ 九 整合再交付：merge.sh 原子合併；衝突、rebase 或檢查失敗即回滾；
+       執行全量套件；不可逆和對外動作由協調者執行
+    │
+    └─ 出口：合併結果 ──▶ zakk-workflow 落倉與報告
+不用它：小而明確的任務；寫說明書比工作本身費時時，自己做。
+```
+<!-- /skill-flow -->
+
 ## 選擇引擎
 
 | 引擎 | 唯讀語義 | 適合的工作 |

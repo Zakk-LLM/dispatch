@@ -23,6 +23,33 @@ a task arrives
 ```
 <!-- /skill-map -->
 
+## Flow
+
+<!-- skill-flow -->
+```text
+Entry: work decomposes for parallel workers, or the user requests delegation
+ │
+ ├─ Choose engine: omp for no-command research/review; Codex for command-running audits;
+ │   OpenCode read-only for planning and inspect for commands
+ ├─ Preflight: agent.sh --engine <e> --help; agents.sh --list;
+ │   capacity.sh --engine <e>
+ ├─ 1. Create the run directory
+ ├─ 2. Decompose by file ownership; declare order in PLAN.md; one worktree per writer
+ ├─ 3. Write task specifications: scope fence, executable acceptance, live notes,
+ │      prohibitions; paste regression scope from impact.sh
+ ├─ 4. Pick engine, tier, profile, and limits
+ ├─ 5. Dispatch
+ ├─ 6. Supervise without idling; cap processes at 90 minutes
+ ├─ 7. Review yourself: read diff, enforce scope, run acceptance and negative controls
+ ├─ 8. Fix rounds and continuation: resume the same engine; restart on wrong premise
+ └─ 9. Integrate and ship: merge.sh atomically; rollback on conflict, rebase, or check failure;
+       run the full suite; the orchestrator performs irreversible and external actions
+    │
+    └─ Exit: merged result ──▶ zakk-workflow for landing and report
+Not for: a small obvious task; do it yourself when the specification costs more than the work.
+```
+<!-- /skill-flow -->
+
 ## Choose an engine
 
 | Engine | Read-only semantics | Give it |
