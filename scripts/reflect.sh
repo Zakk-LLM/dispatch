@@ -102,7 +102,7 @@ PY
 }
 
 ENGINE=$(read_started engine 2>/dev/null || printf '%s\n' omp)
-case "$ENGINE" in omp|codex) ;; *) echo "unsupported worker engine: $ENGINE" >&2; exit 2 ;; esac
+case "$ENGINE" in omp|codex|opencode) ;; *) echo "unsupported worker engine: $ENGINE" >&2; exit 2 ;; esac
 if [ "$DRY" = 1 ]; then
   NUMBER=$(next_number) || exit 2
   build_prompt || exit 2
@@ -142,6 +142,8 @@ ARGS=(--run-dir "$REFLECT_RUN" --label reflector --prompt-file "$PROMPT_OUT"
 case "$ENGINE" in
   omp) ARGS+=(--permission read-only --add-dir "$WORKER_CWD" --add-dir "$WORKER") ;;
   codex) ARGS+=(--sandbox read-only --add-dir "$WORKER_CWD" --add-dir "$WORKER") ;;
+  # OpenCode has no --add-dir; its adapter allows external_directory for referenced files.
+  opencode) ARGS+=(--permission read-only) ;;
 esac
 [ -n "$MODEL" ] && ARGS+=(--model "$MODEL")
 # The prompt build and the state reads above already spent part of the budget.

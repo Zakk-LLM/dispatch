@@ -8,13 +8,14 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 
 usage() {
   cat <<'EOF'
-Usage: dispatch.sh --engine omp|codex --run-dir DIR --jobs FILE [--weight light|medium|heavy] [--max N]
+Usage: dispatch.sh --engine omp|codex|opencode --run-dir DIR --jobs FILE [--weight light|medium|heavy] [--max N]
                          [--common "ARGS"] [--dry-run]
 
 FILE is JSONL, one job per line. `label` is required; `engine` defaults to --engine.
 Common keys: tier model cwd prompt_file timeout stall max_tools admission depends_on worktree resume.
 OMP-only keys: thinking role permission network allow_git.
 Codex-only keys: effort sandbox profile approve_for_me add_dir network.
+OpenCode-only keys: variant agent permission allow_cmd fork network allow_git.
 
 prompt_file defaults to <run-dir>/agents/<label>/prompt.md. Independent jobs run
 hardest-tier-first. Global concurrency is the larger engine capacity; each engine also keeps
@@ -42,18 +43,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$ENGINE" ] && [ -n "$RUN" ] && [ -n "$JOBS" ] || { usage >&2; exit 2; }
-case "$ENGINE" in omp|codex) ;; *) echo "unsupported engine: $ENGINE" >&2; exit 2 ;; esac
+case "$ENGINE" in omp|codex|opencode) ;; *) echo "unsupported engine: $ENGINE" >&2; exit 2 ;; esac
 [ -f "$JOBS" ] || { echo "no such job file: $JOBS" >&2; exit 2; }
 
 OMP_CAP=$("$HERE/capacity.sh" --engine omp "$WEIGHT" 2>/dev/null) || OMP_CAP=3
-CODEX_CAP=$("$HERE/capacity.sh" --engine codex "$WEIGHT" 2>/dev/null) || CODEX_CAP=3
+METERED_CAP=$("$HERE/capacity.sh" --engine opencode "$WEIGHT" 2>/dev/null) || METERED_CAP=3
 # A full pool still gets one waiting wrapper, but cannot occupy every scheduler slot and block
 # work from the independent pool.
 [ "${OMP_CAP:-0}" -ge 1 ] 2>/dev/null || OMP_CAP=1
-[ "${CODEX_CAP:-0}" -ge 1 ] 2>/dev/null || CODEX_CAP=1
-if [ "$OMP_CAP" -gt "$CODEX_CAP" ]; then CAP=$OMP_CAP; else CAP=$CODEX_CAP; fi
+[ "${METERED_CAP:-0}" -ge 1 ] 2>/dev/null || METERED_CAP=1
+if [ "$OMP_CAP" -gt "$METERED_CAP" ]; then CAP=$OMP_CAP; else CAP=$METERED_CAP; fi
 [ "$MAX" -gt 0 ] 2>/dev/null && [ "$MAX" -lt "$CAP" ] && CAP=$MAX
-echo "dispatching with concurrency $CAP (weight $WEIGHT; omp lane $OMP_CAP, codex lane $CODEX_CAP)" >&2
+echo "dispatching with concurrency $CAP (weight $WEIGHT; omp lane $OMP_CAP, codex/opencode lane $METERED_CAP)" >&2
 
 # Expand each job into a complete agent.sh argument line, hardest tier first, with its
 # dependencies attached so the scheduler below can hold it back.
@@ -67,6 +68,7 @@ common = {"tier", "model", "cwd", "prompt_file", "timeout", "stall", "max_tools"
 specific = {
     "omp": {"thinking", "role", "permission", "network", "allow_git"},
     "codex": {"effort", "sandbox", "profile", "approve_for_me", "add_dir", "network"},
+    "opencode": {"variant", "agent", "permission", "allow_cmd", "fork", "network", "allow_git"},
 }
 jobs = []
 for n, line in enumerate(open(sys.argv[1]), 1):
@@ -101,9 +103,12 @@ for j in sorted(jobs, key=lambda j: order.get(j.get("tier", "standard"), 2)):
     if engine == "omp":
         mappings += [("thinking", "--thinking"), ("role", "--role"),
                      ("permission", "--permission")]
-    else:
+    elif engine == "codex":
         mappings += [("effort", "--effort"), ("sandbox", "--sandbox"),
                      ("profile", "--profile")]
+    else:
+        mappings += [("variant", "--variant"), ("agent", "--agent"),
+                     ("permission", "--permission")]
     for key, flag in mappings:
         if j.get(key) is not None:
             a += [flag, str(j[key])]
@@ -115,6 +120,8 @@ for j in sorted(jobs, key=lambda j: order.get(j.get("tier", "standard"), 2)):
         a += ["--allow-git"]
     if j.get("approve_for_me"):
         a += ["--approve-for-me"]
+    if j.get("fork"):
+        a += ["--fork"]
     add_dirs = j.get("add_dir") or []
     if isinstance(add_dirs, str):
         add_dirs = [add_dirs]
@@ -122,6 +129,13 @@ for j in sorted(jobs, key=lambda j: order.get(j.get("tier", "standard"), 2)):
         sys.exit(f"job {label!r}: field 'add_dir' is invalid for engine 'codex'")
     for value in add_dirs:
         a += ["--add-dir", value]
+    allow_cmds = j.get("allow_cmd") or []
+    if isinstance(allow_cmds, str):
+        allow_cmds = [allow_cmds]
+    if not isinstance(allow_cmds, list) or not all(isinstance(value, str) for value in allow_cmds):
+        sys.exit(f"job {label!r}: field 'allow_cmd' is invalid for engine 'opencode'")
+    for value in allow_cmds:
+        a += ["--allow-cmd", value]
     deps = ",".join(j.get("depends_on") or []) or "-"
     print(label + "\t" + deps + "\t" + engine + "\t" + " ".join(shlex.quote(x) for x in a))
 
@@ -160,7 +174,8 @@ fi
 
 declare -A DEPS ENGINE_OF ARGS RESULT PID_OF CAP_OF
 CAP_OF[omp]=$OMP_CAP
-CAP_OF[codex]=$CODEX_CAP
+CAP_OF[codex]=$METERED_CAP
+CAP_OF[opencode]=$METERED_CAP
 ORDER=()
 while IFS=$'\t' read -r label deps engine args; do
   [ "$deps" = - ] && deps=
@@ -173,7 +188,10 @@ FAIL=0
 engine_running() {
   local wanted=$1 item count=0
   for item in "${ORDER[@]}"; do
-    [ "${ENGINE_OF[$item]:-}" = "$wanted" ] || continue
+    case "$wanted:${ENGINE_OF[$item]:-}" in
+      omp:omp|codex:codex|codex:opencode|opencode:codex|opencode:opencode) ;;
+      *) continue ;;
+    esac
     if [ -n "${PID_OF[$item]:-}" ] && [ -z "${RESULT[$item]:-}" ]; then
       count=$((count + 1))
     fi
