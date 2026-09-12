@@ -14,11 +14,16 @@ commit、merge 與發佈。三個引擎共用執行目錄、難度分級、依�
 
 ```text
 任務進來
- ├─ 定結構 ─────▶ zakk-architecture ──介面取值──▶ web-ui
- ├─ 一次改動 ───▶ zakk-maintain ─┬─ 計劃、落倉、門禁、報告 ─▶ zakk-workflow
- │                              ├─ 判 diff ──────────────▶ zakk-review ─▶ zakk-workflow
- │                              └─ 派工 ─────────────────▶ dispatch --engine omp | codex | opencode
- └─ 任何中文 ───▶ chinese-skill（橫切，每份都讀）
+ ├─ 定結構（包結構、資料、部署形態、前端目錄）
+ │    └─▶ zakk-architecture ──介面取值──▶ web-ui
+ │              └─ 必出三份文件：設計語言(web-ui) / 架構(本份) / 工作流(zakk-workflow)
+ ├─ 一次改動（修復、小功能、文件、skill 改動）
+ │    └─▶ zakk-maintain
+ │          ├─ 1 計劃寫成檔案 ──送審──▶ 另一個頭腦
+ │          ├─ 2 按批准的計劃寫說明書 ──派工──▶ dispatch --engine omp | codex | opencode
+ │          ├─ 3 判 diff ──▶ zakk-review ；審者自己做消融、門禁、對拍 ；再派一個沒看過計劃的冷讀
+ │          └─ 4 落倉與報告 ──▶ zakk-workflow（分支、提交、合併請求、完成報告）
+ └─ 任何中文 ──▶ chinese-skill（橫切：每份都讀，壓縮、恢復、切換任務後重讀）
 ```
 <!-- /skill-map -->
 
@@ -26,26 +31,27 @@ commit、merge 與發佈。三個引擎共用執行目錄、難度分級、依�
 
 <!-- skill-flow -->
 ```text
-入口：工作大到可拆給平行工作代理，或使用者要求委派
+入口：工作大到要拆給平行工作代理，或使用者要求委派
  │
- ├─ 選引擎：omp 做不執行命令的調研與審查；Codex 做需執行命令的稽核；
- │   OpenCode 用 read-only 規劃、用 inspect 執行命令
- ├─ Preflight：agent.sh --engine <e> --help；agents.sh --list；
- │   capacity.sh --engine <e>
+ ├─ 選引擎：
+ │     omp      read-only 不給 bash 與寫入 → 不需執行命令的審查與調研
+ │     codex    read-only 能執行命令、核心擋寫入 → 審者要執行測試或門禁的稽核
+ │     opencode read-only 是規劃模式；inspect 才執行命令 → 規劃用 read-only，測試/lint 用 inspect
+ ├─ Preflight：agent.sh --engine <e> --help ／ agents.sh --list ／ capacity.sh --engine <e>
+ ├─ 何時不用它：小任務自己做；gpt-6 只留給計劃審、大冷讀、跨 crate 實施
+ │
  ├─ 一 建立執行目錄
- ├─ 二 按檔案歸屬拆分；在 PLAN.md 聲明順序；每個寫入者各用一個 worktree
- ├─ 三 寫任務說明：範圍柵欄、可執行驗收、live notes、禁止項；
- │      從 impact.sh 貼入回歸範圍
- ├─ 四 選引擎、tier、設定檔和限額
+ ├─ 二 按檔案歸屬拆分，聲明順序（PLAN.md；每個可寫代理各有 worktree；依賴失敗則跳過）
+ ├─ 三 寫任務說明（範圍柵欄、可執行驗收、live-notes、禁止項；從 impact.sh 貼入回歸範圍）
+ ├─ 四 選引擎、tier、設定檔、限額
  ├─ 五 派發
- ├─ 六 不空轉地監督；進程 90 分鐘封頂
- ├─ 七 自己復查：讀 diff、核範圍、執行每條驗收和負控制
- ├─ 八 修復輪與續跑：同引擎 resume；前提錯誤時重開
- └─ 九 整合再交付：merge.sh 原子合併；衝突、rebase 或檢查失敗即回滾；
-       執行全量套件；不可逆和對外動作由協調者執行
-    │
-    └─ 出口：合併結果 ──▶ zakk-workflow 落倉與報告
-不用它：小而明確的任務；寫說明書比工作本身費時時，自己做。
+ ├─ 六 不空轉地監督（等通知；一個半小時封頂）
+ ├─ 七 復查——永遠不委派：代理的報告是主張，只有你執行過的命令才是證據；
+ │  讀 diff、核範圍、執行每條驗收、做負控制
+ ├─ 八 修復輪與續跑（同引擎 resume；上下文小或前提錯誤就重開）
+ └─ 九 整合再交付：merge.sh 原子合併；衝突、rebase 失敗或檢查失敗即回滾；
+       在此執行全量套件；不可逆步驟由你做，對外動作先問使用者
+出口：合併結果 ──▶ zakk-workflow 落倉與報告
 ```
 <!-- /skill-flow -->
 
