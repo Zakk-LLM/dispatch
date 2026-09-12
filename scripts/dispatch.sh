@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Dispatch a whole fan-out from a job list: hardest first, concurrency derived from the
-# machine, everything else delegated to agent.sh --engine omp. One command instead of N background
+# machine, everything else delegated to the selected agent adapter. One command instead of N background
 # invocations the orchestrator has to track by hand.
 set -uo pipefail
 
@@ -8,20 +8,17 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 
 usage() {
   cat <<'EOF'
-Usage: dispatch.sh --run-dir DIR --jobs FILE [--weight light|medium|heavy] [--max N]
+Usage: dispatch.sh --engine omp|codex --run-dir DIR --jobs FILE [--weight light|medium|heavy] [--max N]
                          [--common "ARGS"] [--dry-run]
 
-FILE is JSONL, one job per line. Recognized keys, all optional except label:
-
-  {"label":"cache", "tier":"deep", "cwd":"/repo", "permission":"workspace-write",
-   "worktree":true, "worktree_base":"main", "timeout":3600, "stall":300,
-   "schema":"/path/schema.json", "network":false, "allow_git":false,
-   "prompt_file":"/path/prompt.md", "variant":"high", "model":"provider/model",
-   "agent":"build", "fork":false, "depends_on":["schema-design"]}
+FILE is JSONL, one job per line. `label` is required; `engine` defaults to --engine.
+Common keys: tier model cwd prompt_file timeout stall max_tools admission depends_on worktree resume.
+OMP-only keys: thinking role permission network allow_git.
+Codex-only keys: effort sandbox profile approve_for_me add_dir network.
 
 prompt_file defaults to <run-dir>/agents/<label>/prompt.md. Independent jobs run
-hardest-tier-first so the long ones start while there is still capacity; concurrency is
-min(--max, capacity.sh --weight).
+hardest-tier-first. Global concurrency is the larger engine capacity; each engine also keeps
+its own lane limit so a full quota pool cannot block work from the independent pool.
 
 depends_on holds labels that must finish successfully first. A dependent job is not dispatched
 until they do, and is skipped outright if any of them fails — running it against a missing or
@@ -30,9 +27,10 @@ cycles are rejected before anything is dispatched.
 EOF
 }
 
-RUN=; JOBS=; WEIGHT=medium; MAX=0; COMMON=; DRY=0
+ENGINE=; RUN=; JOBS=; WEIGHT=medium; MAX=0; COMMON=; DRY=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --engine) ENGINE=$2; shift 2 ;;
     --run-dir) RUN=$2; shift 2 ;;
     --jobs) JOBS=$2; shift 2 ;;
     --weight) WEIGHT=$2; shift 2 ;;
@@ -43,25 +41,33 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
-[ -n "$RUN" ] && [ -n "$JOBS" ] || { usage >&2; exit 2; }
+[ -n "$ENGINE" ] && [ -n "$RUN" ] && [ -n "$JOBS" ] || { usage >&2; exit 2; }
+case "$ENGINE" in omp|codex) ;; *) echo "unsupported engine: $ENGINE" >&2; exit 2 ;; esac
 [ -f "$JOBS" ] || { echo "no such job file: $JOBS" >&2; exit 2; }
 
-CAP=$("$HERE/capacity.sh" "$WEIGHT" 2>/dev/null) || CAP=3
+OMP_CAP=$("$HERE/capacity.sh" --engine omp "$WEIGHT" 2>/dev/null) || OMP_CAP=3
+CODEX_CAP=$("$HERE/capacity.sh" --engine codex "$WEIGHT" 2>/dev/null) || CODEX_CAP=3
+# A full pool still gets one waiting wrapper, but cannot occupy every scheduler slot and block
+# work from the independent pool.
+[ "${OMP_CAP:-0}" -ge 1 ] 2>/dev/null || OMP_CAP=1
+[ "${CODEX_CAP:-0}" -ge 1 ] 2>/dev/null || CODEX_CAP=1
+if [ "$OMP_CAP" -gt "$CODEX_CAP" ]; then CAP=$OMP_CAP; else CAP=$CODEX_CAP; fi
 [ "$MAX" -gt 0 ] 2>/dev/null && [ "$MAX" -lt "$CAP" ] && CAP=$MAX
-# Capacity reaches zero when the machine-wide cap is already taken. Launching one job anyway
-# is correct: agent.sh queues on the slot lock. A zero here would spin forever instead.
-if [ "${CAP:-0}" -lt 1 ]; then
-  CAP=1
-  echo "machine is at the global cap; jobs will queue on the slot lock one at a time" >&2
-fi
-echo "dispatching with concurrency $CAP (weight $WEIGHT)" >&2
+echo "dispatching with concurrency $CAP (weight $WEIGHT; omp lane $OMP_CAP, codex lane $CODEX_CAP)" >&2
 
 # Expand each job into a complete agent.sh argument line, hardest tier first, with its
 # dependencies attached so the scheduler below can hold it back.
-CMDS=$(RUN_DIR="$RUN" python3 - "$JOBS" <<'PY'
+CMDS=$(RUN_DIR="$RUN" DEFAULT_ENGINE="$ENGINE" python3 - "$JOBS" <<'PY'
 import json, os, shlex, sys
 order = {"frontier": 0, "deep": 1, "standard": 2, "cheap": 3}
 run = os.environ["RUN_DIR"]
+default_engine = os.environ["DEFAULT_ENGINE"]
+common = {"tier", "model", "cwd", "prompt_file", "timeout", "stall", "max_tools",
+          "admission", "depends_on", "worktree", "resume"}
+specific = {
+    "omp": {"thinking", "role", "permission", "network", "allow_git"},
+    "codex": {"effort", "sandbox", "profile", "approve_for_me", "add_dir", "network"},
+}
 jobs = []
 for n, line in enumerate(open(sys.argv[1]), 1):
     line = line.strip()
@@ -73,16 +79,32 @@ for n, line in enumerate(open(sys.argv[1]), 1):
         sys.exit(f"job file line {n}: {e}")
     if "label" not in j:
         sys.exit(f"job file line {n}: missing label")
+    engine = j.get("engine", default_engine)
+    if engine not in specific:
+        sys.exit(f"job file line {n}: unsupported engine {engine!r}")
+    allowed = {"label", "engine"} | common | specific[engine]
+    invalid = sorted(set(j) - allowed)
+    if invalid:
+        sys.exit(f"job file line {n}: field {invalid[0]!r} is invalid for engine {engine!r}")
+    j["engine"] = engine
     jobs.append(j)
 
 for j in sorted(jobs, key=lambda j: order.get(j.get("tier", "standard"), 2)):
     label = j["label"]
+    engine = j["engine"]
     a = ["--run-dir", run, "--label", label]
     a += ["--prompt-file", j.get("prompt_file", f"{run}/agents/{label}/prompt.md")]
-    for key, flag in (("tier", "--tier"), ("variant", "--variant"), ("model", "--model"),
-                      ("agent", "--agent"), ("cwd", "--cwd"), ("permission", "--permission"),
-                      ("schema", "--schema"), ("timeout", "--timeout"), ("stall", "--stall"),
-                      ("worktree_base", "--worktree-base"), ("resume", "--resume")):
+    mappings = [("tier", "--tier"), ("model", "--model"), ("cwd", "--cwd"),
+                ("timeout", "--timeout"), ("stall", "--stall"),
+                ("max_tools", "--max-tools"), ("admission", "--admission"),
+                ("resume", "--resume")]
+    if engine == "omp":
+        mappings += [("thinking", "--thinking"), ("role", "--role"),
+                     ("permission", "--permission")]
+    else:
+        mappings += [("effort", "--effort"), ("sandbox", "--sandbox"),
+                     ("profile", "--profile")]
+    for key, flag in mappings:
         if j.get(key) is not None:
             a += [flag, str(j[key])]
     if j.get("worktree"):
@@ -91,10 +113,17 @@ for j in sorted(jobs, key=lambda j: order.get(j.get("tier", "standard"), 2)):
         a += ["--network"]
     if j.get("allow_git"):
         a += ["--allow-git"]
-    if j.get("fork"):
-        a += ["--fork"]
+    if j.get("approve_for_me"):
+        a += ["--approve-for-me"]
+    add_dirs = j.get("add_dir") or []
+    if isinstance(add_dirs, str):
+        add_dirs = [add_dirs]
+    if not isinstance(add_dirs, list) or not all(isinstance(value, str) for value in add_dirs):
+        sys.exit(f"job {label!r}: field 'add_dir' is invalid for engine 'codex'")
+    for value in add_dirs:
+        a += ["--add-dir", value]
     deps = ",".join(j.get("depends_on") or []) or "-"
-    print(label + "\t" + deps + "\t" + " ".join(shlex.quote(x) for x in a))
+    print(label + "\t" + deps + "\t" + engine + "\t" + " ".join(shlex.quote(x) for x in a))
 
 # A dependency that does not exist, or a cycle, would deadlock the scheduler or silently drop
 # work. Both are decided here, before a single agent starts.
@@ -122,27 +151,40 @@ PY
 [ -n "$CMDS" ] || { echo "no jobs found in $JOBS" >&2; exit 2; }
 
 if [ "$DRY" = 1 ]; then
-  printf '%s\n' "$CMDS" | while IFS=$'\t' read -r label deps args; do
-    printf '%s%s: agent.sh --engine omp %s %s\n' "$label" \
-      "$([ "$deps" != - ] && echo " (after $deps)")" "$args" "$COMMON"
+  printf '%s\n' "$CMDS" | while IFS=$'\t' read -r label deps engine args; do
+    printf '%s%s: agent.sh --engine %s %s %s\n' "$label" \
+      "$([ "$deps" != - ] && echo " (after $deps)")" "$engine" "$args" "$COMMON"
   done
   exit 0
 fi
 
-declare -A DEPS ARGS RESULT PID_OF
+declare -A DEPS ENGINE_OF ARGS RESULT PID_OF CAP_OF
+CAP_OF[omp]=$OMP_CAP
+CAP_OF[codex]=$CODEX_CAP
 ORDER=()
-while IFS=$'\t' read -r label deps args; do
+while IFS=$'\t' read -r label deps engine args; do
   [ "$deps" = - ] && deps=
-  ORDER+=("$label"); DEPS[$label]=$deps; ARGS[$label]=$args
+  ORDER+=("$label"); DEPS[$label]=$deps; ENGINE_OF[$label]=$engine; ARGS[$label]=$args
 done <<< "$CMDS"
 
 mkdir -p "$RUN/logs"
 FAIL=0
 
+engine_running() {
+  local wanted=$1 item count=0
+  for item in "${ORDER[@]}"; do
+    [ "${ENGINE_OF[$item]:-}" = "$wanted" ] || continue
+    if [ -n "${PID_OF[$item]:-}" ] && [ -z "${RESULT[$item]:-}" ]; then
+      count=$((count + 1))
+    fi
+  done
+  printf '%s\n' "$count"
+}
+
 launch() {
   local label=$1
   echo "start $label" >&2
-  eval "\"$HERE/agent.sh\" --engine omp ${ARGS[$label]} $COMMON" > "$RUN/logs/$label.dispatch.log" 2>&1 &
+  eval "\"$HERE/agent.sh\" --engine \"${ENGINE_OF[$label]}\" ${ARGS[$label]} $COMMON" > "$RUN/logs/$label.dispatch.log" 2>&1 &
   PID_OF[$label]=$!
 }
 
@@ -171,6 +213,8 @@ while [ "$remaining" -gt 0 ]; do
     [ -n "${PID_OF[$label]:-}" ] && continue
     case "$(deps_state "$label")" in
       ready)
+        [ "$(engine_running "${ENGINE_OF[$label]}")" -ge "${CAP_OF[${ENGINE_OF[$label]}]}" ] &&
+          continue
         [ "$(jobs -pr | wc -l)" -ge "$CAP" ] && continue
         launch "$label"; progressed=1 ;;
       skip)

@@ -73,7 +73,7 @@ PY
 
 build_prompt() {
   PROMPT_OUT="$WORKER/reflect-$NUMBER.prompt.md"
-  PYTHONPATH="$HERE/engines/omp" python3 - "$WORKER" "$RUN" "$NUMBER" "$HERE/../references/reflect-prompt.md" \
+  PYTHONPATH="$HERE/engines/$ENGINE" python3 - "$WORKER" "$RUN" "$NUMBER" "$HERE/../references/reflect-prompt.md" \
     "$PROMPT_OUT" <<'PY'
 import json, pathlib, sys
 from events import scan_tools
@@ -101,6 +101,8 @@ print(f"{len(tools)} completed tools; showing {min(len(tools), 40)}")
 PY
 }
 
+ENGINE=$(read_started engine 2>/dev/null || printf '%s\n' omp)
+case "$ENGINE" in omp|codex) ;; *) echo "unsupported worker engine: $ENGINE" >&2; exit 2 ;; esac
 if [ "$DRY" = 1 ]; then
   NUMBER=$(next_number) || exit 2
   build_prompt || exit 2
@@ -118,7 +120,7 @@ REFLECT_STARTED=$(date +%s)
 STARTED_AT=$(read_started started_at) || { echo "invalid started.json" >&2; exit 2; }
 WORKER_CWD=$(read_started cwd) || { echo "invalid started.json" >&2; exit 2; }
 NUMBER=$(next_number) || exit 2
-TOOLS_AT_CHECK=$(PYTHONPATH="$HERE/engines/omp" python3 -c \
+TOOLS_AT_CHECK=$(PYTHONPATH="$HERE/engines/$ENGINE" python3 -c \
   'from events import scan_tools; import sys; print(sum(x["ok"] for x in scan_tools(sys.argv[1], 0)[0]))' \
   "$WORKER/events.jsonl")
 BASE_AT=$(STATE_FILE="$STATE" LABEL="$LABEL" STARTED_AT="$STARTED_AT" python3 <<'PY'
@@ -135,8 +137,12 @@ build_prompt || exit 2
 REFLECT_RUN="$RUN/reflect/$LABEL-$NUMBER"
 mkdir -p "$REFLECT_RUN" || exit 2
 ARGS=(--run-dir "$REFLECT_RUN" --label reflector --prompt-file "$PROMPT_OUT"
-      --permission read-only --admission refuse --timeout 300 --max-tools 10 --tier "$TIER"
-      --cwd "$REFLECT_RUN" --add-dir "$WORKER_CWD" --add-dir "$WORKER")
+      --admission refuse --timeout 300 --max-tools 10 --tier "$TIER"
+      --cwd "$REFLECT_RUN")
+case "$ENGINE" in
+  omp) ARGS+=(--permission read-only --add-dir "$WORKER_CWD" --add-dir "$WORKER") ;;
+  codex) ARGS+=(--sandbox read-only --add-dir "$WORKER_CWD" --add-dir "$WORKER") ;;
+esac
 [ -n "$MODEL" ] && ARGS+=(--model "$MODEL")
 # The prompt build and the state reads above already spent part of the budget.
 REMAINING=$((390 - ($(date +%s) - REFLECT_STARTED)))
@@ -144,7 +150,7 @@ if [ "$REMAINING" -le 0 ]; then
   AGENT_CODE=124
 else
   AGENT_START_STAGGER=0 AGENT_LOCK_RETRIES=1 \
-    timeout --signal=KILL "$REMAINING" "$HERE/agent.sh" --engine omp "${ARGS[@]}"
+    timeout --signal=KILL "$REMAINING" "$HERE/agent.sh" --engine "$ENGINE" "${ARGS[@]}"
   AGENT_CODE=$?
 fi
 REFLECTOR="$REFLECT_RUN/agents/reflector"
@@ -230,7 +236,7 @@ fi
 # left alone.
 mkdir -p "$(dirname "$STATE")"
 flock "$STATE.lock" env STATE_FILE="$STATE" LABEL="$LABEL" STARTED_AT="$STARTED_AT" \
-  NUMBER="$NUMBER" WORKER="$WORKER" SCRIPTS="$HERE/engines/omp" python3 <<'PY'
+  NUMBER="$NUMBER" WORKER="$WORKER" SCRIPTS="$HERE/engines/$ENGINE" python3 <<'PY'
 import json, os, pathlib, sys, time
 sys.path.insert(0, os.environ["SCRIPTS"])
 from events import scan_tools

@@ -58,10 +58,19 @@ while :; do
   OUT=$(flock "$STATE.lock" env RUN_DIR="$RUN" STATE_FILE="$STATE" WARN_PCT="$WARN" \
         PEEK="$PEEK" REFLECT_TOOLS="$REFLECT_TOOLS" REFLECT_MIN="$REFLECT_MIN" \
         SCRIPTS_DIR="$HERE" python3 <<'PY'
-import json, os, pathlib, shlex, sys, time
+import importlib.util, json, os, pathlib, shlex, sys, time
 
-sys.path.insert(0, str(pathlib.Path(os.environ["SCRIPTS_DIR"]) / "engines" / "omp"))
-from events import last_event, repeated_failure, scan_tools
+event_modules = {}
+def event_module(engine):
+    if engine not in ("omp", "codex"):
+        raise SystemExit(f"unsupported worker engine: {engine}")
+    if engine not in event_modules:
+        path = pathlib.Path(os.environ["SCRIPTS_DIR"]) / "engines" / engine / "events.py"
+        spec = importlib.util.spec_from_file_location(f"dispatch_events_{engine}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        event_modules[engine] = module
+    return event_modules[engine]
 
 run = pathlib.Path(os.environ["RUN_DIR"])
 state_file = pathlib.Path(os.environ["STATE_FILE"])
@@ -91,6 +100,7 @@ for a in dispatched:
     except (OSError, KeyError, json.JSONDecodeError):
         started = {}
         started_at = None
+    parser = event_module(started.get("engine") or "omp")
     tools_key = f"{a.name}#tools"
     tools = seen.get(tools_key) or {}
     if started_at is not None:
@@ -103,7 +113,7 @@ for a in dispatched:
             truncated = False
         if truncated:
             tools = {"started_at": started_at, "offset": 0, "count": 0}
-        calls, offset = scan_tools(events, int(tools.get("offset", 0)))
+        calls, offset = parser.scan_tools(events, int(tools.get("offset", 0)))
         updated = {"started_at": started_at, "offset": offset,
                    "count": int(tools.get("count", 0)) + sum(c["ok"] for c in calls)}
         if seen.get(tools_key) != updated:
@@ -148,7 +158,7 @@ for a in dispatched:
                 seen[key] = "EXPIRING"
                 changed.append((a.name, f"EXPIRING {max(left, 0)}s left of {limit}s", "", ""))
         # Burning wall-clock without progress: the same tool failing over and over.
-        looping = repeated_failure(a / "events.jsonl")
+        looping = parser.repeated_failure(a / "events.jsonl")
         if looping:
             key = f"{a.name}#loop"
             if seen.get(key) != looping[0]:
@@ -199,7 +209,11 @@ if os.environ.get("PEEK") == "1":
         ev = a / "events.jsonl"
         if not ev.exists():
             continue
-        line = last_event(ev) or "(no event yet)"
+        try:
+            started = json.loads((a / "started.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            started = {}
+        line = event_module(started.get("engine") or "omp").last_event(ev) or "(no event yet)"
         # Repeating an unchanged line every poll is the noise this whole design avoids.
         if seen.get(f"{a.name}#peek") == line:
             continue
