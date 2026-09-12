@@ -62,7 +62,7 @@ import importlib.util, json, os, pathlib, shlex, sys, time
 
 event_modules = {}
 def event_module(engine):
-    if engine not in ("omp", "codex"):
+    if engine not in ("omp", "codex", "opencode"):
         raise SystemExit(f"unsupported worker engine: {engine}")
     if engine not in event_modules:
         path = pathlib.Path(os.environ["SCRIPTS_DIR"]) / "engines" / engine / "events.py"
