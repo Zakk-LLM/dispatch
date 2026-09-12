@@ -32,6 +32,7 @@ run() {
 
 run "contract-entry" python3 scripts/check-contract.py entry SKILL.md README.md README.zh-TW.md
 run "contract-omp" python3 scripts/check-contract.py engine omp references/engines/omp.md
+run "contract-codex" python3 scripts/check-contract.py engine codex references/engines/codex.md
 run "contract-template" python3 scripts/check-contract.py template references/prompt-template.md
 run "shell-syntax" sh scripts/check-shell-syntax.sh
 

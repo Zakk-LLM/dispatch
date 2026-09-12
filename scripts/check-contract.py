@@ -41,7 +41,7 @@ ENGINES = {
         },
     },
 }
-INTEGRATED_ENGINES = ("omp",)
+INTEGRATED_ENGINES = ("omp", "codex")
 
 # The evidence rules a read-only worker is given. They are the same on all three engines and
 # have already drifted once: a rule was added to one sibling's template and the other two kept

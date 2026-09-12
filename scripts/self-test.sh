@@ -93,6 +93,40 @@ def fake_omp(lines, delay=0, exit_code=0):
     script.chmod(0o755)
     return bindir
 
+def codex_completed(item_type, item_id, **fields):
+    item = {"id": item_id, "type": item_type}
+    item.update(fields)
+    return json.dumps({"type": "item.completed", "item": item},
+                      separators=(",", ":")) + "\n"
+
+def fake_codex(lines, delay=0, exit_code=0):
+    bindir = tmp / "codex-bin"
+    bindir.mkdir(exist_ok=True)
+    script = bindir / "codex"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json,os,pathlib,sys,time\n"
+        "p=os.environ.get('FAKE_COUNT')\n"
+        "open(p,'a').write('1\\n') if p else None\n"
+        f"lines={lines!r}\n"
+        "answer=None\n"
+        "for line in lines:\n"
+        " print(line, flush=True)\n"
+        " try:\n"
+        "  item=json.loads(line).get('item') or {}\n"
+        "  if item.get('type') == 'agent_message': answer=item.get('text')\n"
+        " except (json.JSONDecodeError, AttributeError): pass\n"
+        "args=sys.argv[1:]\n"
+        "if os.environ.get('FAKE_ARGV'):\n"
+        " pathlib.Path(os.environ['FAKE_ARGV']).write_text(json.dumps(args))\n"
+        "if os.environ.get('FAKE_ENV'):\n"
+        " pathlib.Path(os.environ['FAKE_ENV']).write_text(json.dumps({k:os.environ.get(k) for k in ('AGENT_START_STAGGER','AGENT_LOCK_RETRIES')}))\n"
+        "if answer is not None and '-o' in args:\n"
+        " pathlib.Path(args[args.index('-o')+1]).write_text(answer+'\\n')\n"
+        f"time.sleep({delay})\nsys.exit({exit_code})\n")
+    script.chmod(0o755)
+    return bindir
+
 def dispatch_fake(name, lines, *, delay=0, exit_code=0, max_tools=None, timeout=4):
     bindir = fake_omp(lines, delay, exit_code)
     run_dir = tmp / name
@@ -499,6 +533,207 @@ def new_run_prompts_for_maintainer_words():
         env=os.environ | {"OMP_RUNS_DIR": str(base)}, capture_output=True, text=True)
     assert result.returncode == 0
     assert "maintainer.md" in (pathlib.Path(result.stdout.strip()) / "PLAN.md").read_text()
+
+def adapter_argv_passthrough():
+    adapter = root / "scripts/engines/codex/agent.sh"
+    original = adapter.read_bytes()
+    try:
+        adapter.write_text("#!/usr/bin/env python3\nimport json,os,pathlib,sys\n"
+                           "pathlib.Path(os.environ['ARGV_OUT']).write_text(json.dumps(sys.argv[1:]))\n")
+        adapter.chmod(0o755)
+        output = tmp / "adapter-argv.json"
+        args = ["--label", "literal value", "--resume", "thread/one", "--network"]
+        result = subprocess.run([root / "scripts/agent.sh", "--engine", "codex", *args],
+                                env=os.environ | {"ARGV_OUT": str(output)}, capture_output=True)
+        assert result.returncode == 0 and json.loads(output.read_text()) == args
+    finally:
+        adapter.write_bytes(original)
+        adapter.chmod(0o755)
+
+def codex_wrapper_and_output():
+    lines = [codex_completed("command_execution", "ok", command="inspect",
+                             exit_code=0, status="completed").strip(),
+             codex_completed("command_execution", "bad", command="retry",
+                             exit_code=2, status="completed").strip(),
+             codex_completed("agent_message", "answer", text="READY").strip()]
+    bindir = fake_codex(lines)
+    run_dir = tmp / "codex-wrapper"
+    argv = tmp / "codex-argv.json"
+    env = os.environ | {"PATH": f"{bindir}:{os.environ['PATH']}",
+                        "AGENT_START_STAGGER": "0", "AGENT_LOCK_RETRIES": "1",
+                        "AGENT_ORCHESTRATION_ENV": str(tmp / "no-agent-env"),
+                        "CODEX_REGISTRY_DIR": str(tmp / "codex-wrapper-registry"),
+                        "FAKE_ARGV": str(argv)}
+    result = subprocess.run([root / "scripts/agent.sh", "--engine", "codex",
+        "--run-dir", run_dir, "--label", "w", "--prompt", "x", "--admission", "off",
+        "--timeout", "4"], env=env, capture_output=True, text=True)
+    meta = json.loads((run_dir / "agents/w/meta.json").read_text())
+    started = json.loads((run_dir / "agents/w/started.json").read_text())
+    assert result.returncode == 0, result.stderr
+    assert meta["engine"] == started["engine"] == "codex"
+    assert meta["tool_calls"] == 1 and meta["failed_commands"] == 1
+    assert (run_dir / "agents/w/last.txt").read_text().strip() == "READY"
+    assert "-o" in json.loads(argv.read_text())
+
+def mixed_parser_selection():
+    run_dir = tmp / "mixed-parser"
+    now = int(time.time())
+    codex_row = codex_completed("command_execution", "one", command="inspect",
+                                exit_code=0, status="completed")
+    for label, engine in (("as-codex", "codex"), ("as-omp", "omp")):
+        worker = run_dir / f"agents/{label}"
+        worker.mkdir(parents=True)
+        (worker / "events.jsonl").write_text(codex_row)
+        (worker / "started.json").write_text(json.dumps({"engine": engine,
+            "started_at": now, "deadline": now + 1000, "timeout_s": 1000}))
+    result = subprocess.run([root / "scripts/watch.sh", run_dir, "--timeout", "0",
+        "--reflect-tools", "999", "--reflect-min", "999999"], capture_output=True, text=True)
+    state = json.loads((run_dir / ".watch-state").read_text())
+    assert result.returncode == 1
+    assert state["as-codex#tools"]["count"] == 1
+    assert state["as-omp#tools"]["count"] == 0
+
+def codex_reflector_uses_worker_policy():
+    run_dir = tmp / "codex-reflect"
+    worker = run_dir / "agents/w"
+    work = tmp / "codex-reflect-work"
+    worker.mkdir(parents=True); work.mkdir()
+    now = int(time.time())
+    (worker / "prompt.md").write_text("SPEC\n")
+    (worker / "NOTES.md").write_text("# Live notes\n")
+    (run_dir / "maintainer.md").write_text("MAINTAINER\n")
+    (worker / "events.jsonl").write_text(codex_completed(
+        "command_execution", "one", command="inspect", exit_code=0, status="completed"))
+    (worker / "started.json").write_text(json.dumps({"engine": "codex", "started_at": now,
+        "cwd": str(work), "deadline": now + 1000, "timeout_s": 1000}))
+    answer = json.dumps({"verdict": "NO_ISSUE", "reason": "The route matches."})
+    lines = [codex_completed("agent_message", "answer", text=answer).strip()]
+    bindir = fake_codex(lines)
+    argv, environment = tmp / "reflect-codex-argv.json", tmp / "reflect-codex-env.json"
+    env = os.environ | {"PATH": f"{bindir}:{os.environ['PATH']}",
+        "FAKE_ARGV": str(argv), "FAKE_ENV": str(environment),
+        "AGENT_ORCHESTRATION_ENV": str(tmp / "no-agent-env"),
+        "CODEX_REGISTRY_DIR": str(tmp / "codex-reflect-registry"),
+        "AGENT_SLOTS_DIR": str(tmp / "codex-reflect-slots")}
+    result = subprocess.run([root / "scripts/reflect.sh", run_dir, "w"], env=env,
+                            capture_output=True, text=True)
+    args = json.loads(argv.read_text())
+    seen_env = json.loads(environment.read_text())
+    assert result.returncode == 0, result.stderr
+    assert args[args.index("-s") + 1] == "read-only"
+    assert args.count("--add-dir") == 2
+    assert seen_env == {"AGENT_START_STAGGER": "0", "AGENT_LOCK_RETRIES": "1"}
+    assert json.loads((worker / "reflect-1.json").read_text())["verdict"] == "NO_ISSUE"
+
+def codex_capacity_uses_shared_limit():
+    agents = root / "scripts/agents.sh"
+    original = agents.read_bytes()
+    try:
+        agents.write_text("#!/bin/sh\ncase \"$*\" in *codex*) echo 2;; *opencode*) echo 1;; *) echo 0;; esac\n")
+        agents.chmod(0o755)
+        result = subprocess.run([root / "scripts/capacity.sh", "--engine", "codex", "light"],
+            env=os.environ | {"AGENT_MAX_AGENTS": "3", "CODEX_MAX_AGENTS": "99",
+                              "AGENT_CONCURRENCY_CEILING": "99",
+                              "AGENT_ORCHESTRATION_ENV": str(tmp / "no-agent-env")},
+            capture_output=True, text=True)
+        assert result.returncode == 0 and result.stdout.strip() == "0"
+        assert "running=3/3" in result.stderr and "AGENT_MAX_AGENTS=3" in result.stderr
+    finally:
+        agents.write_bytes(original)
+        agents.chmod(0o755)
+
+def invalid_engine_field():
+    jobs = tmp / "invalid-jobs.jsonl"
+    jobs.write_text(json.dumps({"label": "x", "engine": "codex",
+                                "permission": "read-only"}) + "\n")
+    result = subprocess.run([root / "scripts/dispatch.sh", "--engine", "omp",
+        "--run-dir", tmp / "invalid-run", "--jobs", jobs, "--dry-run"],
+        capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "permission" in result.stderr and "codex" in result.stderr
+
+def live_codex_worktree_is_protected():
+    repo = tmp / "worktree-repo"
+    run_dir = tmp / "worktree-run"
+    worktree = run_dir / "worktrees/custom-name"
+    repo.mkdir()
+    def git(*args, cwd=repo):
+        return subprocess.run(["git", *args], cwd=cwd, check=True,
+                              capture_output=True, text=True).stdout.strip()
+    git("init", "-b", "main")
+    git("config", "user.name", "Control")
+    git("config", "user.email", "control@example.invalid")
+    git("config", "commit.gpgsign", "false")
+    (repo / "base.txt").write_text("base\n")
+    git("add", "base.txt"); git("commit", "-m", "base")
+    worktree.parent.mkdir(parents=True)
+    git("worktree", "add", "-b", "codex/live", str(worktree), "HEAD")
+    before = git("rev-parse", "codex/live")
+    (repo / "main.txt").write_text("advance\n")
+    git("add", "main.txt"); git("commit", "-m", "advance")
+    registry = tmp / "nonstandard-live-codex-registry"
+    registry.mkdir(parents=True)
+    stat = pathlib.Path(f"/proc/{os.getpid()}/stat").read_text()
+    ticks = int(stat[stat.rindex(") ") + 2:].split()[19])
+    (registry / f"{os.getpid()}.json").write_text(json.dumps({"pid": os.getpid(),
+        "start_ticks": ticks, "cwd": str(worktree), "label": "live", "run_dir": str(run_dir)}))
+    result = subprocess.run([root / "scripts/worktrees.sh", run_dir, "--rebase", "main"],
+        env=os.environ | {"CODEX_REGISTRY_DIR": str(registry),
+                          "OMP_REGISTRY_DIR": str(tmp / "nonstandard-empty-omp-registry"),
+                          "OPENCODE_REGISTRY_DIR": str(tmp / "nonstandard-empty-opencode-registry")},
+        capture_output=True, text=True)
+    assert result.returncode == 0 and "codex/live" in result.stdout and "SKIPPED" in result.stdout
+    assert git("rev-parse", "codex/live") == before
+
+def manual_worker_uses_process_cwd():
+    cwd = tmp / "manual-worker-cwd"
+    cwd.mkdir()
+    (cwd / "exec").write_text("")
+    worker = subprocess.Popen(["bash", "-c", "exec -a codex tail -f exec"], cwd=cwd,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        time.sleep(.2)
+        result = subprocess.run([root / "scripts/agents.sh", "--cwd-live", cwd],
+            env=os.environ | {"OMP_REGISTRY_DIR": str(tmp / "manual-empty-omp"),
+                              "CODEX_REGISTRY_DIR": str(tmp / "manual-empty-codex"),
+                              "OPENCODE_REGISTRY_DIR": str(tmp / "manual-empty-opencode")},
+            capture_output=True, text=True)
+        assert result.returncode == 0 and result.stdout.strip() == "yes", result.stderr
+    finally:
+        worker.terminate()
+        worker.wait(timeout=2)
+
+def mixed_dispatch_preserves_engine_lane():
+    order_file = tmp / "mixed-dispatch-order"
+    capacity = root / "scripts/capacity.sh"
+    omp_adapter = root / "scripts/engines/omp/agent.sh"
+    codex_adapter = root / "scripts/engines/codex/agent.sh"
+    originals = {path: path.read_bytes() for path in (capacity, omp_adapter, codex_adapter)}
+    try:
+        capacity.write_text(
+            "#!/bin/sh\ncase \"$*\" in *codex*) echo 0;; *) echo 5;; esac\n")
+        codex_adapter.write_text(
+            "#!/bin/sh\nsleep 1\nprintf 'codex-done\\n' >> \"$ORDER_FILE\"\n")
+        omp_adapter.write_text("#!/bin/sh\nprintf 'omp-start\\n' >> \"$ORDER_FILE\"\n")
+        for path in originals:
+            path.chmod(0o755)
+        jobs = tmp / "mixed-dispatch.jsonl"
+        rows = [{"label": f"codex-{index}", "engine": "codex"} for index in range(5)]
+        rows.append({"label": "omp-independent", "engine": "omp"})
+        jobs.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        result = subprocess.run([root / "scripts/dispatch.sh", "--engine", "omp",
+            "--run-dir", tmp / "mixed-dispatch-run", "--jobs", jobs],
+            env=os.environ | {"ORDER_FILE": str(order_file)},
+            capture_output=True, text=True, timeout=15)
+        order = order_file.read_text().splitlines()
+        assert result.returncode == 0, result.stderr
+        assert order.index("omp-start") < order.index("codex-done"), order
+    finally:
+        for path, body in originals.items():
+            path.write_bytes(body)
+            path.chmod(0o755)
+
+
 phase = sys.argv[2]
 if phase == "events":
     run("event parser preserves partial lines and correlates arguments", parser_boundaries)
@@ -545,9 +780,31 @@ elif phase == "status":
         status_finished_reports)
     run("wait and merge ignore nested reflector runs", nested_runs_stay_isolated)
     run("new runs prompt for maintainer words", new_run_prompts_for_maintainer_words)
+elif phase == "step3":
+    run("agent entry preserves Codex adapter argv", adapter_argv_passthrough)
+    run("Codex fake CLI handles output and event metadata", codex_wrapper_and_output)
+    run("mixed run selects each worker event parser independently", mixed_parser_selection)
+    run("Codex reflection preserves the worker engine policy", codex_reflector_uses_worker_policy)
+    run("Codex capacity uses AGENT_MAX_AGENTS for the shared pool", codex_capacity_uses_shared_limit)
+    run("engine-specific JSON field names the field and engine", invalid_engine_field)
+    run("live Codex worktree is protected from rebase", live_codex_worktree_is_protected)
+    run("mixed dispatch keeps an independent engine lane", mixed_dispatch_preserves_engine_lane)
+    run("manual worker liveness uses the actual process cwd", manual_worker_uses_process_cwd)
 else:
     raise SystemExit(f"unknown phase {phase}")
 PY
+
+if [ "${2:-}" = step3 ]; then
+  fresh || exit 2
+  expect 0 "step 3 engine controls" python3 "$TMP/event-controls.py" "$TMP/w" step3
+  cat "$TMP/out"
+  if [ "$fail" -ne 0 ]; then
+    printf '%d passed, %d dead\n' "$pass" "$fail"
+    exit 1
+  fi
+  printf '%d controls passed, none dead\n' "$pass"
+  exit 0
+fi
 # Confirm every contract mode is green first. If a baseline were red, none of the breaks below
 # would establish anything.
 fresh || exit 2
@@ -555,10 +812,15 @@ expect 0 "baseline entry contract" python3 scripts/check-contract.py entry \
   "$TMP/w/SKILL.md" "$TMP/w/README.md" "$TMP/w/README.zh-TW.md"
 expect 0 "baseline engine contract" python3 scripts/check-contract.py engine "$ENGINE" \
   "$TMP/w/references/engines/omp.md"
+expect 0 "baseline Codex engine contract" python3 scripts/check-contract.py engine codex \
+  "$TMP/w/references/engines/codex.md"
 expect 0 "baseline template contract" python3 scripts/check-contract.py template \
   "$TMP/w/references/prompt-template.md"
 fresh || exit 2
 expect 0 "reflection event controls" python3 "$TMP/event-controls.py" "$TMP/w" events
+cat "$TMP/out"
+fresh || exit 2
+expect 0 "step 3 engine controls" python3 "$TMP/event-controls.py" "$TMP/w" step3
 cat "$TMP/out"
 
 # The description loses this engine's read-only boundary. That was the actual state of all
@@ -676,6 +938,10 @@ expect 1 "reflect.sh does not parse" sh "$TMP/w/scripts/check-shell-syntax.sh"
 fresh || exit 2
 printf '\ncase x in\n' >> "$TMP/w/scripts/engines/omp/agent.sh"
 expect 1 "engines/omp/agent.sh does not parse" sh "$TMP/w/scripts/check-shell-syntax.sh"
+
+fresh || exit 2
+printf '\ncase x in\n' >> "$TMP/w/scripts/engines/codex/agent.sh"
+expect 1 "engines/codex/agent.sh does not parse" sh "$TMP/w/scripts/check-shell-syntax.sh"
 
 
 if [ "$fail" -ne 0 ]; then
