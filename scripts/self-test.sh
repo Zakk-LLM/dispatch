@@ -57,7 +57,7 @@ require_count() {
 # Shared event fixtures exercise the parser through both public consumers.
 fresh || exit 2
 cat > "$TMP/event-controls.py" <<'PY'
-import fcntl, json, os, pathlib, shlex, subprocess, sys, threading, time
+import fcntl, importlib.util, json, os, pathlib, shlex, subprocess, sys, threading, time
 
 root = pathlib.Path(sys.argv[1])
 tmp = root.parent
@@ -126,6 +126,66 @@ def fake_codex(lines, delay=0, exit_code=0):
         f"time.sleep({delay})\nsys.exit({exit_code})\n")
     script.chmod(0o755)
     return bindir
+
+_MISSING = object()
+
+def opencode_event(kind, call, name="read", ok=True, args=None, exit_code=_MISSING):
+    status = "pending" if kind == "tool_execution_start" else \
+        ("completed" if ok else "error")
+    state = {"status": status, "input": args or {}}
+    if exit_code is not _MISSING:
+        state["metadata"] = {"exit": exit_code}
+    row = {"type": "tool_use", "part": {"callID": call, "tool": name, "state": state}}
+    return json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n"
+
+def fake_opencode(lines, delay=0, exit_code=0):
+    bindir = tmp / "opencode-bin"
+    bindir.mkdir(exist_ok=True)
+    script = bindir / "opencode"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json,os,pathlib,sys,time\n"
+        "p=os.environ.get('FAKE_COUNT')\n"
+        "open(p,'a').write('1\\n') if p else None\n"
+        f"lines={lines!r}\n"
+        "for line in lines:\n print(line, flush=True)\n"
+        "args=sys.argv[1:]\n"
+        "if os.environ.get('FAKE_ARGV'):\n"
+        " pathlib.Path(os.environ['FAKE_ARGV']).write_text(json.dumps(args))\n"
+        "if os.environ.get('FAKE_ENV'):\n"
+        " pathlib.Path(os.environ['FAKE_ENV']).write_text(json.dumps({k:os.environ.get(k) for k in ('AGENT_START_STAGGER','AGENT_LOCK_RETRIES','OPENCODE_CONFIG_CONTENT')}))\n"
+        f"time.sleep({delay})\nsys.exit({exit_code})\n")
+    script.chmod(0o755)
+    return bindir
+
+def opencode_parser_boundaries():
+    spec = importlib.util.spec_from_file_location(
+        "opencode_events", root / "scripts/engines/opencode/events.py")
+    parser = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(parser)
+    path = tmp / "opencode-events.jsonl"
+    body = opencode_event("tool_execution_start", "pending") + \
+           opencode_event("tool_execution_end", "a", args={"path": "/one"}) + \
+           opencode_event("tool_execution_end", "b", name="skill", ok=False,
+                          args={"path": "/two"}) + \
+           opencode_event("tool_execution_end", "c", name="bash",
+                          args={"command": "x" * 100}, exit_code=2) + \
+           opencode_event("tool_execution_end", "d", name="bash", exit_code=0) + \
+           opencode_event("tool_execution_end", "e", name="bash", exit_code=None) + \
+           "{malformed}\n"
+    path.write_text(body + opencode_event("tool_execution_end", "half").rstrip())
+    rows, offset = parser.scan_tools(path, 0)
+    assert [row["name"] for row in rows] == ["read", "skill", "bash", "bash", "bash"]
+    assert [row["ok"] for row in rows] == [True, False, False, True, True]
+    assert "/one" in rows[0]["args_head"] and "/two" in rows[1]["args_head"]
+    assert all(len(row["args_head"]) <= 80 for row in rows)
+    assert offset == len(body.encode())
+    rows2, offset2 = parser.scan_tools(path, offset)
+    assert rows2 == [] and offset2 == offset
+    with path.open("a") as output:
+        output.write("\n")
+    rows2, offset2 = parser.scan_tools(path, offset)
+    assert len(rows2) == 1 and offset2 == path.stat().st_size
 
 def dispatch_fake(name, lines, *, delay=0, exit_code=0, max_tools=None, timeout=4):
     bindir = fake_omp(lines, delay, exit_code)
@@ -550,6 +610,22 @@ def adapter_argv_passthrough():
         adapter.write_bytes(original)
         adapter.chmod(0o755)
 
+def opencode_adapter_argv_passthrough():
+    adapter = root / "scripts/engines/opencode/agent.sh"
+    original = adapter.read_bytes()
+    try:
+        adapter.write_text("#!/usr/bin/env python3\nimport json,os,pathlib,sys\n"
+                           "pathlib.Path(os.environ['ARGV_OUT']).write_text(json.dumps(sys.argv[1:]))\n")
+        adapter.chmod(0o755)
+        output = tmp / "opencode-adapter-argv.json"
+        args = ["--label", "literal value", "--resume", "session/one", "--network"]
+        result = subprocess.run([root / "scripts/agent.sh", "--engine", "opencode", *args],
+                                env=os.environ | {"ARGV_OUT": str(output)}, capture_output=True)
+        assert result.returncode == 0 and json.loads(output.read_text()) == args
+    finally:
+        adapter.write_bytes(original)
+        adapter.chmod(0o755)
+
 def codex_wrapper_and_output():
     lines = [codex_completed("command_execution", "ok", command="inspect",
                              exit_code=0, status="completed").strip(),
@@ -575,23 +651,53 @@ def codex_wrapper_and_output():
     assert (run_dir / "agents/w/last.txt").read_text().strip() == "READY"
     assert "-o" in json.loads(argv.read_text())
 
+def opencode_wrapper_and_output():
+    lines = [
+        opencode_event("tool_execution_end", "ok", name="read").strip(),
+        opencode_event("tool_execution_end", "bad", name="bash", exit_code=2).strip(),
+        json.dumps({"type": "text", "sessionID": "session-one",
+                    "part": {"text": "READY"}}, separators=(",", ":"))]
+    bindir = fake_opencode(lines)
+    run_dir = tmp / "opencode-wrapper"
+    argv = tmp / "opencode-argv.json"
+    env = os.environ | {"PATH": f"{bindir}:{os.environ['PATH']}",
+                        "AGENT_START_STAGGER": "0", "AGENT_LOCK_RETRIES": "1",
+                        "AGENT_ORCHESTRATION_ENV": str(tmp / "no-agent-env"),
+                        "OPENCODE_REGISTRY_DIR": str(tmp / "opencode-wrapper-registry"),
+                        "FAKE_ARGV": str(argv)}
+    result = subprocess.run([root / "scripts/agent.sh", "--engine", "opencode",
+        "--run-dir", run_dir, "--label", "w", "--prompt", "x", "--admission", "off",
+        "--timeout", "4"], env=env, capture_output=True, text=True)
+    meta = json.loads((run_dir / "agents/w/meta.json").read_text())
+    started = json.loads((run_dir / "agents/w/started.json").read_text())
+    args = json.loads(argv.read_text())
+    assert result.returncode == 0, result.stderr
+    assert meta["engine"] == started["engine"] == "opencode"
+    assert meta["tool_calls"] == 1 and meta["failed_commands"] == 1
+    assert meta["thread_id"] == "session-one"
+    assert (run_dir / "agents/w/last.txt").read_text().strip() == "READY"
+    assert args[:4] == ["run", "--format", "json", "--dir"]
+
 def mixed_parser_selection():
-    run_dir = tmp / "mixed-parser"
+    run_dir = tmp / f"mixed-parser-{phase}"
     now = int(time.time())
-    codex_row = codex_completed("command_execution", "one", command="inspect",
-                                exit_code=0, status="completed")
-    for label, engine in (("as-codex", "codex"), ("as-omp", "omp")):
+    rows = {
+        "as-omp": ("omp", event("tool_execution_end", "one")),
+        "as-codex": ("codex", codex_completed(
+            "command_execution", "one", command="inspect", exit_code=0, status="completed")),
+        "as-opencode": ("opencode", opencode_event("tool_execution_end", "one")),
+    }
+    for label, (engine, row) in rows.items():
         worker = run_dir / f"agents/{label}"
         worker.mkdir(parents=True)
-        (worker / "events.jsonl").write_text(codex_row)
+        (worker / "events.jsonl").write_text(row)
         (worker / "started.json").write_text(json.dumps({"engine": engine,
             "started_at": now, "deadline": now + 1000, "timeout_s": 1000}))
     result = subprocess.run([root / "scripts/watch.sh", run_dir, "--timeout", "0",
         "--reflect-tools", "999", "--reflect-min", "999999"], capture_output=True, text=True)
     state = json.loads((run_dir / ".watch-state").read_text())
     assert result.returncode == 1
-    assert state["as-codex#tools"]["count"] == 1
-    assert state["as-omp#tools"]["count"] == 0
+    assert all(state[f"{label}#tools"]["count"] == 1 for label in rows)
 
 def codex_reflector_uses_worker_policy():
     run_dir = tmp / "codex-reflect"
@@ -625,6 +731,41 @@ def codex_reflector_uses_worker_policy():
     assert seen_env == {"AGENT_START_STAGGER": "0", "AGENT_LOCK_RETRIES": "1"}
     assert json.loads((worker / "reflect-1.json").read_text())["verdict"] == "NO_ISSUE"
 
+def opencode_reflector_uses_worker_policy():
+    run_dir = tmp / "opencode-reflect"
+    worker = run_dir / "agents/w"
+    work = tmp / "opencode-reflect-work"
+    worker.mkdir(parents=True); work.mkdir()
+    now = int(time.time())
+    (worker / "prompt.md").write_text("SPEC\n")
+    (worker / "NOTES.md").write_text("# Live notes\n")
+    (run_dir / "maintainer.md").write_text("MAINTAINER\n")
+    (worker / "events.jsonl").write_text(
+        opencode_event("tool_execution_end", "one", name="read"))
+    (worker / "started.json").write_text(json.dumps({"engine": "opencode", "started_at": now,
+        "cwd": str(work), "deadline": now + 1000, "timeout_s": 1000}))
+    answer = json.dumps({"verdict": "NO_ISSUE", "reason": "The route matches."})
+    lines = [json.dumps({"type": "text", "sessionID": "reflection",
+                        "part": {"text": answer}}, separators=(",", ":"))]
+    bindir = fake_opencode(lines)
+    argv, environment = tmp / "reflect-opencode-argv.json", tmp / "reflect-opencode-env.json"
+    env = os.environ | {"PATH": f"{bindir}:{os.environ['PATH']}",
+        "FAKE_ARGV": str(argv), "FAKE_ENV": str(environment),
+        "AGENT_ORCHESTRATION_ENV": str(tmp / "no-agent-env"),
+        "OPENCODE_REGISTRY_DIR": str(tmp / "opencode-reflect-registry"),
+        "AGENT_SLOTS_DIR": str(tmp / "opencode-reflect-slots")}
+    result = subprocess.run([root / "scripts/reflect.sh", run_dir, "w"], env=env,
+                            capture_output=True, text=True)
+    args = json.loads(argv.read_text())
+    seen_env = json.loads(environment.read_text())
+    config = json.loads(seen_env.pop("OPENCODE_CONFIG_CONTENT"))
+    assert result.returncode == 0, result.stderr
+    assert "--add-dir" not in args
+    assert args[args.index("--agent") + 1] == "plan"
+    assert config["permission"]["external_directory"] == "allow"
+    assert seen_env == {"AGENT_START_STAGGER": "0", "AGENT_LOCK_RETRIES": "1"}
+    assert json.loads((worker / "reflect-1.json").read_text())["verdict"] == "NO_ISSUE"
+
 def codex_capacity_uses_shared_limit():
     agents = root / "scripts/agents.sh"
     original = agents.read_bytes()
@@ -643,14 +784,20 @@ def codex_capacity_uses_shared_limit():
         agents.chmod(0o755)
 
 def invalid_engine_field():
-    jobs = tmp / "invalid-jobs.jsonl"
-    jobs.write_text(json.dumps({"label": "x", "engine": "codex",
-                                "permission": "read-only"}) + "\n")
-    result = subprocess.run([root / "scripts/dispatch.sh", "--engine", "omp",
-        "--run-dir", tmp / "invalid-run", "--jobs", jobs, "--dry-run"],
-        capture_output=True, text=True)
-    assert result.returncode == 2
-    assert "permission" in result.stderr and "codex" in result.stderr
+    cases = [
+        ({"label": "x", "engine": "codex", "permission": "read-only"},
+         "permission", "codex"),
+        ({"label": "x", "engine": "opencode", "sandbox": "read-only"},
+         "sandbox", "opencode"),
+    ]
+    for index, (job, field, engine) in enumerate(cases):
+        jobs = tmp / f"invalid-jobs-{index}.jsonl"
+        jobs.write_text(json.dumps(job) + "\n")
+        result = subprocess.run([root / "scripts/dispatch.sh", "--engine", "omp",
+            "--run-dir", tmp / f"invalid-run-{index}", "--jobs", jobs, "--dry-run"],
+            capture_output=True, text=True)
+        assert result.returncode == 2
+        assert field in result.stderr and engine in result.stderr
 
 def live_codex_worktree_is_protected():
     repo = tmp / "worktree-repo"
@@ -711,7 +858,7 @@ def mixed_dispatch_preserves_engine_lane():
     originals = {path: path.read_bytes() for path in (capacity, omp_adapter, codex_adapter)}
     try:
         capacity.write_text(
-            "#!/bin/sh\ncase \"$*\" in *codex*) echo 0;; *) echo 5;; esac\n")
+            "#!/bin/sh\ncase \"$*\" in *codex*|*opencode*) echo 0;; *) echo 5;; esac\n")
         codex_adapter.write_text(
             "#!/bin/sh\nsleep 1\nprintf 'codex-done\\n' >> \"$ORDER_FILE\"\n")
         omp_adapter.write_text("#!/bin/sh\nprintf 'omp-start\\n' >> \"$ORDER_FILE\"\n")
@@ -790,6 +937,13 @@ elif phase == "step3":
     run("live Codex worktree is protected from rebase", live_codex_worktree_is_protected)
     run("mixed dispatch keeps an independent engine lane", mixed_dispatch_preserves_engine_lane)
     run("manual worker liveness uses the actual process cwd", manual_worker_uses_process_cwd)
+elif phase == "step4":
+    run("agent entry preserves OpenCode adapter argv", opencode_adapter_argv_passthrough)
+    run("OpenCode event parser preserves terminal event semantics", opencode_parser_boundaries)
+    run("OpenCode fake CLI handles output and event metadata", opencode_wrapper_and_output)
+    run("three-engine run selects each worker event parser independently", mixed_parser_selection)
+    run("OpenCode reflection uses read-only without add-dir", opencode_reflector_uses_worker_policy)
+    run("wrong-engine JSON fields name the field and engine", invalid_engine_field)
 else:
     raise SystemExit(f"unknown phase {phase}")
 PY
@@ -797,6 +951,17 @@ PY
 if [ "${2:-}" = step3 ]; then
   fresh || exit 2
   expect 0 "step 3 engine controls" python3 "$TMP/event-controls.py" "$TMP/w" step3
+  cat "$TMP/out"
+  if [ "$fail" -ne 0 ]; then
+    printf '%d passed, %d dead\n' "$pass" "$fail"
+    exit 1
+  fi
+  printf '%d controls passed, none dead\n' "$pass"
+  exit 0
+fi
+if [ "${2:-}" = step4 ]; then
+  fresh || exit 2
+  expect 0 "step 4 engine controls" python3 "$TMP/event-controls.py" "$TMP/w" step4
   cat "$TMP/out"
   if [ "$fail" -ne 0 ]; then
     printf '%d passed, %d dead\n' "$pass" "$fail"
@@ -814,6 +979,8 @@ expect 0 "baseline engine contract" python3 scripts/check-contract.py engine "$E
   "$TMP/w/references/engines/omp.md"
 expect 0 "baseline Codex engine contract" python3 scripts/check-contract.py engine codex \
   "$TMP/w/references/engines/codex.md"
+expect 0 "baseline OpenCode engine contract" python3 scripts/check-contract.py engine opencode \
+  "$TMP/w/references/engines/opencode.md"
 expect 0 "baseline template contract" python3 scripts/check-contract.py template \
   "$TMP/w/references/prompt-template.md"
 fresh || exit 2
@@ -821,6 +988,9 @@ expect 0 "reflection event controls" python3 "$TMP/event-controls.py" "$TMP/w" e
 cat "$TMP/out"
 fresh || exit 2
 expect 0 "step 3 engine controls" python3 "$TMP/event-controls.py" "$TMP/w" step3
+cat "$TMP/out"
+fresh || exit 2
+expect 0 "step 4 engine controls" python3 "$TMP/event-controls.py" "$TMP/w" step4
 cat "$TMP/out"
 
 # The description loses this engine's read-only boundary. That was the actual state of all
@@ -876,6 +1046,13 @@ page="$TMP/w/references/engines/omp.md"
 require_count 1 '| `workspace-write` | plus `write, edit, bash, ast_edit` | implementation |' "$page"
 sed -i '/^| `workspace-write` | plus `write, edit, bash, ast_edit` | implementation |$/d' "$page"
 expect 1 "an access profile is missing" python3 scripts/check-contract.py engine "$ENGINE" "$page"
+
+# The OpenCode contract check must fail when its default audit profile disappears.
+fresh || exit 2
+page="$TMP/w/references/engines/opencode.md"
+require_count 1 '| `inspect` (default) | `build` | every command except destructive and history-changing git; the edit tool is denied | audits, reviews, running tests and linters |' "$page"
+sed -i '/^| `inspect` (default) | `build` | every command except destructive and history-changing git; the edit tool is denied | audits, reviews, running tests and linters |$/d' "$page"
+expect 1 "OpenCode access profile is missing" python3 scripts/check-contract.py engine opencode "$page"
 
 # The README loses the sentence saying these profile names do not carry to the siblings.
 # Codex's README once said its read-only "reads only", contradicting its own SKILL.md; this
@@ -942,6 +1119,10 @@ expect 1 "engines/omp/agent.sh does not parse" sh "$TMP/w/scripts/check-shell-sy
 fresh || exit 2
 printf '\ncase x in\n' >> "$TMP/w/scripts/engines/codex/agent.sh"
 expect 1 "engines/codex/agent.sh does not parse" sh "$TMP/w/scripts/check-shell-syntax.sh"
+
+fresh || exit 2
+printf '\ncase x in\n' >> "$TMP/w/scripts/engines/opencode/agent.sh"
+expect 1 "engines/opencode/agent.sh does not parse" sh "$TMP/w/scripts/check-shell-syntax.sh"
 
 
 if [ "$fail" -ne 0 ]; then
