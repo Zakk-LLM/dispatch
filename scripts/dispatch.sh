@@ -63,8 +63,11 @@ import json, os, shlex, sys
 order = {"frontier": 0, "deep": 1, "standard": 2, "cheap": 3}
 run = os.environ["RUN_DIR"]
 default_engine = os.environ["DEFAULT_ENGINE"]
+# schema is common because every adapter takes --schema; what it enforces differs (codex
+# validates against the schema, omp and opencode only parse the result as JSON), and the
+# engine page says so. The honk-lab job files carry it on every line.
 common = {"tier", "model", "cwd", "prompt_file", "timeout", "stall", "max_tools",
-          "admission", "depends_on", "worktree", "resume"}
+          "admission", "depends_on", "worktree", "resume", "schema"}
 specific = {
     "omp": {"thinking", "role", "permission", "network", "allow_git"},
     "codex": {"effort", "sandbox", "profile", "approve_for_me", "add_dir", "network"},
@@ -99,7 +102,7 @@ for j in sorted(jobs, key=lambda j: order.get(j.get("tier", "standard"), 2)):
     mappings = [("tier", "--tier"), ("model", "--model"), ("cwd", "--cwd"),
                 ("timeout", "--timeout"), ("stall", "--stall"),
                 ("max_tools", "--max-tools"), ("admission", "--admission"),
-                ("resume", "--resume")]
+                ("resume", "--resume"), ("schema", "--schema")]
     if engine == "omp":
         mappings += [("thinking", "--thinking"), ("role", "--role"),
                      ("permission", "--permission")]

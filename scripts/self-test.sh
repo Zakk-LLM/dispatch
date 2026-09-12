@@ -783,6 +783,17 @@ def codex_capacity_uses_shared_limit():
         agents.write_bytes(original)
         agents.chmod(0o755)
 
+def common_schema_field_is_accepted():
+    # The old omp_dispatch accepted schema on every line; the first honk-lab dry run after the
+    # merge failed on it, so this pins schema as common for all three engines.
+    for engine in ("omp", "codex", "opencode"):
+        jobs = tmp / f"schema-jobs-{engine}.jsonl"
+        jobs.write_text(json.dumps({"label": "x", "engine": engine, "schema": "/tmp/s.json"}) + "\n")
+        result = subprocess.run([root / "scripts/dispatch.sh", "--engine", "omp",
+            "--run-dir", tmp / f"schema-run-{engine}", "--jobs", jobs, "--dry-run"],
+            capture_output=True, text=True)
+        assert result.returncode == 0 and "--schema /tmp/s.json" in result.stdout, (engine, result.stdout, result.stderr)
+
 def invalid_engine_field():
     cases = [
         ({"label": "x", "engine": "codex", "permission": "read-only"},
@@ -934,6 +945,7 @@ elif phase == "step3":
     run("Codex reflection preserves the worker engine policy", codex_reflector_uses_worker_policy)
     run("Codex capacity uses AGENT_MAX_AGENTS for the shared pool", codex_capacity_uses_shared_limit)
     run("engine-specific JSON field names the field and engine", invalid_engine_field)
+    run("schema is a common job field on every engine", common_schema_field_is_accepted)
     run("live Codex worktree is protected from rebase", live_codex_worktree_is_protected)
     run("mixed dispatch keeps an independent engine lane", mixed_dispatch_preserves_engine_lane)
     run("manual worker liveness uses the actual process cwd", manual_worker_uses_process_cwd)
