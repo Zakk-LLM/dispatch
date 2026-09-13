@@ -57,6 +57,12 @@ reading the repository:
 Report each command with its exit code, and state plainly what you did not check. An honest
 "callers in `x.py` were not exercised by any test" is worth more than a broad scan.
 
+## Environment (only for cloud or background workers)
+- Network: needed / not needed. Secrets visible by name: … External systems it may write to: …
+- Data that must not leave the machine: …
+- Setup file, tool versions, and the smallest command that proves the environment works: …
+Missing any of these means least privilege or local read-only, never "grant everything".
+
 ## Prohibitions
 - Do not run `git commit`, `git push`, `git rebase`, `git checkout`, or any git command that
   changes history or the index.
