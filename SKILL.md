@@ -13,7 +13,7 @@ review gate, and atomic integration are shared across all three engines.
 
 ## Relations
 
-- Depends on: nothing.
+- Depends on: `writing-skill` for the prose of task specs, notes, and reports; `chinese-skill` when any of that is Chinese.
 - Upstream: `zakk-workflow` and `zakk-maintain` send dispatch here.
 - Hands off to: `zakk-review` for judging what a worker returns and `zakk-workflow` for landing it and the completion report, when they are installed. Without them, the review section below is the gate.
 
