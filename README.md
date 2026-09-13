@@ -26,8 +26,9 @@ a task arrives
  │          ├─ 3. Judge the diff ──▶ zakk-review; reviewer performs ablation, gates, and differential checks;
  │          │   then dispatch an uninformed cold reader
  │          └─ 4. Land and report ──▶ zakk-workflow (branch, commit, pull request, completion report)
- └─ any Chinese ──▶ chinese-skill (cross-cutting: every skill reads it; reread after compaction,
-    restoration, or task switching)
+ ├─ any Chinese ──▶ chinese-skill (cross-cutting: every skill reads it; reread after compaction,
+ │                  restoration, or task switching)
+ └─ any English prose ──▶ writing-skill (cross-cutting: README, docs, comments, commit, PR, issue)
 ```
 <!-- /skill-map -->
 
