@@ -125,6 +125,10 @@ correction in `<run>/maintainer.md`; do not ask the reflector to infer it.
 For `reflect-<n>.error`, read `<run>/reflect/<label>-<n>/agents/reflector/events.jsonl`.
 The failed inquiry is recorded and is never re-dispatched automatically.
 
+## A job with side effects was rejected
+
+A worker whose approval was refused, whose guardrail fired, or whose acceptance failed keeps its run directory, worktree, and last state exactly as they are; nothing is cleaned up until the orchestrator has read them. Only the orchestrator restarts the work, either as a new job with a corrected spec or with an explicit `--resume` of the same thread. A worker never retries itself or rewrites its own goal to get past the refusal — that is the drift `REFLECT` exists to catch.
+
 ## Cost control
 
 `status.sh` totals the token usage per run. When output tokens run high for the value

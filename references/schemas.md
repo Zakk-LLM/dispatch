@@ -17,6 +17,8 @@ produces, not about an API's limits:
 
 ## Implementation
 
+A `blocked` result is only usable when `unresolved` states the blocking fact, the commands already tried, and the decision the orchestrator has to make; a bare `blocked` goes back to the worker, not into review. `partial` names what landed and what did not, per file.
+
 ```json
 {
   "type": "object",

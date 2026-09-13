@@ -63,6 +63,10 @@ numbers, and quote a figure that the linked page does not contain.
   same, then check that it did.
 - A missing answer reported as "not found" is a good outcome. An answer that arrives with a
   plausible source and no number is the dangerous one.
+- Judge a research deliverable on five items, each answered yes or no: correct, complete for the
+  question asked, sources of adequate quality, every number traceable to a source, and no tool
+  churn that suggests the agent stopped reading. A model-graded score can propose findings; it
+  never approves.
 
 ## Delegating verification
 
