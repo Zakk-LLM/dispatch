@@ -223,6 +223,7 @@ with the user before anything outward-facing.
 - **Research and data collection**: require a source per claim and verify a sample yourself.
 - **Migration or sweep**: use identical specs over disjoint file batches and merge in small batches.
 - **Audit**: require each finding to state a concrete failure scenario and an acceptance condition.
+- **Lookups**: pinning versions, checking values, confirming what a tool accepts — fan out to the cheap tier in parallel, one question per worker, and consume the answers directly; ten pins came back in twenty minutes this way while the orchestrator kept working.
 
 ## References
 
