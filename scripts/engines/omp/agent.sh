@@ -92,6 +92,34 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# omp_provider_spent <provider>: true when `omp usage -j` shows the provider at or past
+# OMP_FALLBACK_AT of any window, or flags limitReached. A missing or unreadable report means
+# "not spent" so a broken usage endpoint never blocks a dispatch.
+omp_provider_spent() {
+  local cache="${XDG_RUNTIME_DIR:-/tmp}/omp-usage.$(id -u).json"
+  if [ ! -s "$cache" ] || [ -n "$(find "$cache" -mmin +2 2>/dev/null)" ]; then
+    timeout 30 omp usage -j > "$cache.tmp" 2>/dev/null && mv "$cache.tmp" "$cache" || rm -f "$cache.tmp"
+  fi
+  [ -s "$cache" ] || return 1
+  python3 - "$1" "${OMP_FALLBACK_AT:-0.9}" "$cache" <<'PY'
+import json, sys
+provider, at, path = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+try:
+    reports = json.load(open(path)).get("reports", [])
+except Exception:
+    sys.exit(1)
+for r in reports:
+    if r.get("provider") != provider:
+        continue
+    if r.get("metadata", {}).get("limitReached"):
+        sys.exit(0)
+    for l in r.get("limits", []):
+        if float(l.get("amount", {}).get("usedFraction", 0)) >= at:
+            sys.exit(0)
+sys.exit(1)
+PY
+}
+
 if [ -n "$TIER" ]; then
   case "$TIER" in
     cheap)    TIER_THINKING=low ;;
@@ -109,8 +137,19 @@ if [ -n "$TIER" ]; then
   [ -n "$TIER_OVERRIDE" ] && TIER_THINKING=$TIER_OVERRIDE
   [ "$THINKING_SET" = 1 ] || THINKING=$TIER_THINKING
   if [ -z "$MODEL" ]; then
-    TIER_VAR="OMP_TIER_$(printf '%s' "$TIER" | tr '[:lower:]' '[:upper:]')_MODEL"
-    eval "MODEL=\${$TIER_VAR:-}"
+    TIER_UC=$(printf '%s' "$TIER" | tr '[:lower:]' '[:upper:]')
+    eval "MODEL=\${OMP_TIER_${TIER_UC}_MODEL:-}"
+    # Quota-aware routing: a tier bound to a provider whose window is spent moves to the
+    # tier's FALLBACK binding, so a batch dispatched by tier does not stall against an empty
+    # quota. The threshold is OMP_FALLBACK_AT (a used fraction, default 0.9); the usage report
+    # is cached for two minutes because every worker of a batch asks the same question.
+    eval "FALLBACK=\${OMP_TIER_${TIER_UC}_FALLBACK_MODEL:-}"
+    if [ -n "$MODEL" ] && [ -n "$FALLBACK" ] && omp_provider_spent "${MODEL%%/*}"; then
+      echo "tier $TIER: ${MODEL%%/*} quota spent, routing to $FALLBACK" >&2
+      MODEL=$FALLBACK
+      eval "FALLBACK_THINKING=\${OMP_TIER_${TIER_UC}_FALLBACK_THINKING:-}"
+      [ "$THINKING_SET" = 1 ] || [ -z "$FALLBACK_THINKING" ] || THINKING=$FALLBACK_THINKING
+    fi
   fi
 fi
 
