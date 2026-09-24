@@ -166,7 +166,7 @@ its deadlines, resume semantics, and supported job fields.
 ### 6. Supervise without idling
 
 ```sh
-"$DISPATCH_SKILL/scripts/watch.sh" "$RUN" --timeout 120 --peek
+"$DISPATCH_SKILL/scripts/watch.sh" "$RUN" --timeout 1800 --peek   # one long wait, in the background
 ```
 
 Exit 0 means agents changed state; 1 means the window is free for work that needs no agent; 2
@@ -177,8 +177,13 @@ with `note.sh`, which its spec tells it to re-read.
 When watch prints `REFLECT`, run the shown `reflect.sh` command once; it is a reminder,
 not a pause. The three verdicts and what each asks of you: [references/reflect.md](references/reflect.md).
 
-**Never sit idle.** From the first dispatch to the last review, process returned work or do work
-that does not depend on an agent. Fix an available regression ahead of the queue.
+**Work while agents run; wait without polling.** From the first dispatch to the last review,
+process returned work or do work that does not depend on an agent, and fix an available
+regression ahead of the queue. When nothing independent is left, wait once: run `watch.sh` with a
+long `--timeout` as a background command, or end the turn and let the harness's completion
+notification wake you. Do not loop short `watch.sh`, `status.sh`, `tail`, or `sleep` calls —
+each poll re-reads the orchestrator's whole context, and on 2026-09-25 polling was a third of an
+orchestrator's tool calls.
 
 Protect your own context, not the worker's disposable context. Read `result.json` and
 `verify.json`, use `status.sh --brief` as the digest, open `events.jsonl` only on failure, and
