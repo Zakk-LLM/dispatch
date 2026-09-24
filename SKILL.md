@@ -141,6 +141,11 @@ Choose from the actual access boundary the task needs, then read the selected op
 - [Codex](references/engines/codex.md)
 - [OpenCode](references/engines/opencode.md)
 
+When an engine binds a fallback ladder, check the primary provider's live quota before the batch
+(for omp: `omp usage -j`) and route by it — see the engine page's quota-aware routing. A batch
+dispatched blind against a nearly exhausted quota stalls mid-run; a thirty-second check up front
+picks the ladder that will actually finish.
+
 Tier names are shared, but their model, thinking, effort, or variant bindings are engine-specific.
 Profile names and resume identifiers are not portable across engines. `--timeout` also has
 different outer grace periods. Codex enforces its supported JSON Schema subset; omp and OpenCode

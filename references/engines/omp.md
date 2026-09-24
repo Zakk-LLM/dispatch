@@ -7,7 +7,7 @@ You need not read it for shared orchestration steps that do not depend on omp-sp
 
 **A real cost figure.** Every assistant message carries `usage.cost` in dollars, so `meta.json`
 records what a run actually cost rather than a token count you have to price yourself. Measured:
-the same one-file fix cost $0.167 on the flagship and $0.0047 on the cheap model — a 35× spread
+the same one-file fix cost $0.084 on the flagship and $0.0024 on the cheap model — a 35× spread
 that is invisible without this number.
 
 **Tool withholding as the boundary.** `--tools` is an allowlist, and a worker cannot call a tool
@@ -60,6 +60,23 @@ twice, once at each configuration, compare the results against something checkab
 `usage.cost`. Bind the answer in `OMP_TIER_<TIER>_MODEL` and leave this file provider-neutral.
 
 Both halves of a tier are configurable, so the ladder is data rather than code: `OMP_TIER_<TIER>_MODEL` binds the model and `OMP_TIER_<TIER>_THINKING` overrides the thinking. Set both in the machine-local env file and no job has to carry `--thinking` by hand — a ladder that needs a flag on every dispatch is a ladder that will be forgotten on one.
+
+### Quota-aware routing
+
+A provider can run out, and `omp usage -j` reports each authenticated provider's live limits —
+`usedFraction`, `status`, and `limitReached` per window — so the ladder can move off a provider
+*before* it hard-stops instead of after. Bind a second ladder in the same env file with
+`OMP_TIER_<TIER>_FALLBACK_MODEL` and `OMP_TIER_<TIER>_FALLBACK_THINKING`; then, before a batch,
+read the primary provider's `usedFraction` and route by it. Below a comfortable fraction every
+tier runs primary. As it climbs, drop the *cheap* tiers to the fallback first, so the remaining
+quota is spent only where the stronger provider earns it. Past the warning fraction (or
+`limitReached`), run every tier on the fallback until the window resets. The wrapper already applies the last step on its own: a tier whose
+primary provider is at or past `OMP_FALLBACK_AT` (default 0.9) or `limitReached` resolves to its
+fallback binding, with the report cached for two minutes. The graded shift below that threshold
+is your call: resolve the model and thinking per worker and pass them with `--model`/`--thinking`. Prefer the primary while it has
+headroom — the fallback is a weaker bench, not a co-equal. This keeps the file provider-neutral:
+which providers are primary and fallback, and the exact fractions, are data in the env, not
+names here.
 
 What does not change: a read-only worker's bill is almost all input, so the cheapest model at
 low thinking is right for most of a run, and promoting a task is a decision rather than a
