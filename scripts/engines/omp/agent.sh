@@ -424,7 +424,7 @@ session, usage, errors, files, reconnects = None, {}, [], set(), 0
 tool_events, _ = scan_tools(out / "events.jsonl", 0)
 tool_calls = sum(event["ok"] for event in tool_events)
 failed_tools = len(tool_events) - tool_calls
-texts, cost = [], 0.0
+texts, cost, yielded = [], 0.0, None
 for line in (out / "events.jsonl").read_text(errors="replace").splitlines():
     line = line.strip()
     if not line.startswith("{"):
@@ -438,6 +438,13 @@ for line in (out / "events.jsonl").read_text(errors="replace").splitlines():
         session = ev.get("id")
     elif kind == "message_end":
         m = ev.get("message") or {}
+        if m.get("role") == "toolResult" and m.get("toolName") == "yield" and not m.get("isError"):
+            # yield is omp's submit-result tool; some models (Kimi K3) deliver the whole review
+            # through it and end with no assistant text. Progress pings carry only _progress.
+            data = (m.get("details") or {}).get("data")
+            if data is not None and not (isinstance(data, dict) and set(data) <= {"_progress"}):
+                yielded = data
+            continue
         if m.get("role") != "assistant":
             continue
         u = m.get("usage") or {}
@@ -449,6 +456,7 @@ for line in (out / "events.jsonl").read_text(errors="replace").splitlines():
         for c in m.get("content", []):
             if c.get("type") == "text" and c.get("text"):
                 texts.append(c["text"])
+                yielded = None  # text after a yield supersedes it; the last deliverable wins
             if c.get("type") == "toolCall":
                 name = c.get("name") or ""
                 # Arguments arrive as a string; partialArgs is the JSON form when present.
@@ -478,6 +486,14 @@ if session:
     (out / "thread.txt").write_text(session + "\n")
 
 final = texts[-1].strip() if texts else ""
+if yielded is not None:
+    # A lone string field (report, finding, ...) is the text; anything structured stays JSON.
+    if isinstance(yielded, dict) and len(yielded) == 1 and isinstance(next(iter(yielded.values())), str):
+        final = next(iter(yielded.values())).strip()
+    elif isinstance(yielded, str):
+        final = yielded.strip()
+    else:
+        final = json.dumps(yielded, indent=2, ensure_ascii=False)
 schema_error = None
 if schema and final:
     body = final

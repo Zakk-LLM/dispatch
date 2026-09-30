@@ -32,6 +32,11 @@ allowlist is the entire boundary. Do not run untrusted work.
 the prompt and validates the answer afterwards, exiting 65 and recording `schema_error` when it
 does not parse.
 
+**The result may arrive through `yield`.** Some models (Kimi K3) submit the review with the
+`yield` tool and end with no assistant text. The wrapper takes the last non-progress `yield`
+payload as the result unless assistant text follows it: a lone string field becomes the text,
+anything else is written as JSON.
+
 **Search is not in the allowlist.** `--tools` accepts `read, grep, glob, lsp, yield, write,
 edit, bash, ast_edit` and a few experiment tools; there is no `web_search` among them. The
 `read` tool does take a URL, so a restricted worker can still fetch a page it is given, but a
