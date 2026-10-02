@@ -39,7 +39,7 @@ commit、merge 與發佈。三個引擎共用執行目錄、難度分級、依�
  │     codex    read-only 能執行命令、核心擋寫入 → 審者要執行測試或門禁的稽核
  │     opencode read-only 是規劃模式；inspect 才執行命令 → 規劃用 read-only，測試/lint 用 inspect
  ├─ Preflight：agent.sh --engine <e> --help ／ agents.sh --list ／ capacity.sh --engine <e>
- ├─ 何時不用它：小任務自己做；gpt-6 只留給計劃審、大冷讀、跨 crate 實施
+ ├─ 何時不用它：一次搜尋或幾處修改就能完成的小任務自己做；其餘按難度與主供應商的即時額度分派
  │
  ├─ 一 建立執行目錄
  ├─ 二 按檔案歸屬拆分，聲明順序（PLAN.md；每個可寫代理各有 worktree；依賴失敗則跳過）

@@ -43,8 +43,8 @@ Entry: work is large enough to split among parallel workers, or the user asks to
  │     codex    read-only runs commands; the kernel blocks writes → audits that must run tests or gates
  │     opencode read-only is planning mode; inspect runs commands → plan in read-only, test/lint in inspect
  ├─ Preflight: agent.sh --engine <e> --help / agents.sh --list / capacity.sh --engine <e>
- ├─ When not to use it: do small tasks yourself; reserve gpt-6 for plan review, major cold reads,
- │  and cross-crate implementation
+ ├─ When not to use it: a task one search or a few edits finish — do it yourself; route the rest
+ │  by difficulty and the primary provider's live quota
  │
  ├─ 1. Create the run directory
  ├─ 2. Split by file ownership; declare order (PLAN.md; one worktree per writer; skip dependent work on failure)
