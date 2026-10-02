@@ -11,6 +11,9 @@ Usage: verify.sh <run-dir> <label> [--repo DIR] [--base REF] [--check "CMD"]...
   --repo DIR    repository or worktree to inspect  (default: the agent's recorded cwd)
   --base REF    compare against this ref instead of the working tree (e.g. main)
   --check CMD   acceptance command, repeatable; run inside --repo
+  --not-run CMD record an unavailable or skipped acceptance command without executing it
+
+Acceptance commands may exit 77 to report a scarce resource or skipped run; this is not passed.
 
 Set VERIFY_IGNORE to colon-separated globs to treat more paths as build artifacts.
 
@@ -24,12 +27,13 @@ case "${1:-}" in -h|--help|"") usage; exit 0 ;; esac
 RUN=$1; LABEL=${2:-}; shift 2 2>/dev/null || { usage >&2; exit 2; }
 [ -n "$LABEL" ] || { usage >&2; exit 2; }
 
-REPO=; BASE=; CHECKS=()
+REPO=; BASE=; CHECKS=(); NOT_RUN=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO=$2; shift 2 ;;
     --base) BASE=$2; shift 2 ;;
     --check) CHECKS+=("$2"); shift 2 ;;
+    --not-run) NOT_RUN+=("$2"); shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -68,6 +72,8 @@ tail = open(sys.argv[2], errors="replace").read()[-1500:]
 with open(sys.argv[1], "a") as f:
     f.write(json.dumps({"command": os.environ["CHECK_CMD"],
                         "exit_code": int(os.environ["CHECK_CODE"]),
+                        "status": "not run" if os.environ["CHECK_CODE"] == "77" else
+                                  "passed" if os.environ["CHECK_CODE"] == "0" else "failed",
                         "output_tail": tail}, ensure_ascii=False) + "\n")
 PY
   # An unrecorded check is an unverified check, however it exited.
@@ -77,6 +83,16 @@ PY
   fi
   rm -f "$OUT/.check-log"
   echo "   exit=$CODE" >&2
+done
+for cmd in "${NOT_RUN[@]}"; do
+  FAILED=1
+  CHECK_CMD="$cmd" python3 - "$RESULTS" <<'PY' || exit 1
+import json, os, sys
+with open(sys.argv[1], "a") as output:
+    output.write(json.dumps({"command": os.environ["CHECK_CMD"], "exit_code": None,
+                             "status": "not run", "output_tail": ""}) + "\n")
+PY
+  echo "   not run: $cmd" >&2
 done
 
 # A check can itself write files — a formatter, a generator, a careless test. Those changes are
@@ -136,7 +152,7 @@ reasons = []
 if not n_checks:
     reasons.append("no acceptance check was run")
 if failed:
-    reasons.append("an acceptance check failed")
+    reasons.append("an acceptance check failed or was not run")
 if outside:
     reasons.append(f"files changed outside the declared Write scope: {outside}")
 

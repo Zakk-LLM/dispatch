@@ -37,6 +37,7 @@ Behavior:
   --schema FILE      JSON Schema; the final message must match it
   --admission MODE   wait|refuse|off - how to handle a full machine (default: wait)
   --resume THREAD    continue an existing thread id
+  --no-recovery      disable automatic bounded recovery
   --network          allow network access and web search
   --approve-for-me   auto-review escalation requests instead of failing them
   --bypass           no sandbox and no approvals at all. Dangerous, never a default, and only
@@ -49,7 +50,7 @@ EOF
 
 RUN_DIR=; LABEL=; PROMPT_FILE=; PROMPT_TEXT=; CWD=$PWD
 EFFORT=medium; EFFORT_SET=0; SANDBOX=read-only; SCHEMA=; MODEL=; PROFILE=; TIMEOUT=1800; STALL=0; MAX_TOOLS=0; RESUME=
-TIER=
+TIER=; RECOVERY=1
 NETWORK=0; APPROVE=0; BYPASS=0; ADD_DIRS=(); WORKTREE=; WORKTREE_BASE=HEAD; ADMISSION=wait; ALLOW_STALE=0
 HERE=$(cd "$(dirname "$0")" && pwd)
 REG=${CODEX_REGISTRY_DIR:-${XDG_RUNTIME_DIR:-/tmp}/codex-agents}
@@ -87,6 +88,7 @@ while [ $# -gt 0 ]; do
     --max-tools) MAX_TOOLS=$2; shift 2 ;;
     --resume) RESUME=$2; shift 2 ;;
     --admission) ADMISSION=$2; shift 2 ;;
+    --no-recovery) RECOVERY=0; shift ;;
     --network) NETWORK=1; shift ;;
     --approve-for-me) APPROVE=1; shift ;;
     --bypass) BYPASS=1; shift ;;
@@ -127,6 +129,8 @@ case "$ADMISSION" in wait|refuse|off) ;; *) echo "bad --admission: $ADMISSION (w
 case "$LABEL" in */*|.|..) echo "invalid label: $LABEL (no path separators)" >&2; exit 2 ;; esac
 case "$MAX_TOOLS" in *[!0-9]*|"") echo "bad --max-tools: $MAX_TOOLS" >&2; exit 2 ;; esac
 
+# shellcheck source=../../adapter-startup.sh
+. "$HERE/../../adapter-startup.sh"
 CWD=$(cd "$CWD" && pwd) || exit 2
 OUT="$RUN_DIR/agents/$LABEL"
 mkdir -p "$OUT" || exit 2
@@ -137,6 +141,13 @@ if [ -n "$PROMPT_FILE" ]; then
 else
   printf '%s\n' "$PROMPT_TEXT" > "$OUT/prompt.md"
 fi
+ARTIFACT_DIR="$OUT/artifacts"
+mkdir -p "$ARTIFACT_DIR" || exit 2
+ADD_DIRS+=("$ARTIFACT_DIR")
+PROMPT_INPUT="$OUT/.prompt-artifacts.md"
+{ cat "$OUT/prompt.md"
+  printf '\n\nRun artifacts: %s\nWrite logs and temporary evidence only there, never in the repository.\nThe orchestrator owns all Git index, history, branch and remote writes; do not perform them.\n' "$ARTIFACT_DIR"
+} > "$PROMPT_INPUT"
 
 # Structured Outputs rejects a schema the CLI happily forwards, and the rejection costs a
 # whole dispatch, so check the documented subset here.
@@ -300,6 +311,7 @@ if [ "$ADMISSION" != off ]; then
 fi
 
 START=$(date +%s)
+DEADLINE=$((START + TIMEOUT))
 
 # Codex keeps session state in SQLite, and several processes reaching it in the same instant
 # lose to "database is locked". Starts are serialized machine-wide with a short hold so a
@@ -314,38 +326,11 @@ stagger_start() {
   exec {sfd}>&-
 }
 
-# A lock error happens before the model does anything, so retrying repeats nothing. A run that
-# produced real events is never retried, because that would duplicate work.
-locked_without_progress() {
-  grep -qiE "database is locked|SQLITE_BUSY|database table is locked" "$OUT/stderr.log" \
-       "$OUT/events.jsonl" 2>/dev/null || return 1
-  ! grep -qE '"type":"(item\.|turn\.completed)' "$OUT/events.jsonl" 2>/dev/null
-}
-
-ATTEMPT=0
-MAX_ATTEMPTS=${AGENT_LOCK_RETRIES:-4}
-while :; do
-  ATTEMPT=$((ATTEMPT + 1))
-  stagger_start
-  # stdin is the prompt file and nothing else: an inherited terminal stdin makes codex wait
-  # forever. SIGINT first, because Codex turns it into a graceful turn interrupt.
-  ( cd "$CWD" && timeout --signal=INT --kill-after=30 "$TIMEOUT" \
-      codex "${ARGS[@]}" < "$OUT/prompt.md" > "$OUT/events.jsonl" 2> "$OUT/stderr.log" ) &
-  CODEX_PID=$!
-  sleep 2
-  if kill -0 "$CODEX_PID" 2>/dev/null; then break; fi
-  # Already finished: reap it once and remember the status, or the final wait would report 127.
-  wait "$CODEX_PID"; EARLY=$?
-  EARLY_DONE=1; EARLY_CODE=$EARLY
-  if [ "$EARLY" = 0 ] || [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ] || ! locked_without_progress; then
-    break
-  fi
-  EARLY_DONE=0
-  BACKOFF=$((ATTEMPT * ATTEMPT * 2))
-  echo "database locked on attempt $ATTEMPT/$MAX_ATTEMPTS, retrying in ${BACKOFF}s" >&2
-  cp "$OUT/stderr.log" "$OUT/stderr.attempt-$ATTEMPT.log" 2>/dev/null
-  sleep "$BACKOFF"
-done
+stagger_start
+( cd "$CWD" && exec python3 "$HERE/../../recovery.py" --engine codex --out "$OUT" \
+    --deadline "$DEADLINE" --prompt-input "$PROMPT_INPUT" "${RECOVERY_ARGS[@]}" -- \
+    codex "${ARGS[@]}" ) &
+CODEX_PID=$!
 
 STALLED=0
 if [ "$STALL" -gt 0 ] 2>/dev/null; then
@@ -357,7 +342,7 @@ if [ "$STALL" -gt 0 ] 2>/dev/null; then
         echo "stall: no event for $((NOW - LAST))s, interrupting" >> "$OUT/stderr.log"
         touch "$OUT/.stalled"
         kill -INT "$CODEX_PID" 2>/dev/null
-        sleep 20; kill -KILL "$CODEX_PID" 2>/dev/null
+        sleep 30; python3 "$HERE/../../recovery.py" --hard-kill "$OUT" "$CODEX_PID"
         exit 0
       fi
     done ) &
@@ -372,15 +357,15 @@ fi
 if [ "$MAX_TOOLS" -gt 0 ] 2>/dev/null && kill -0 "$CODEX_PID" 2>/dev/null; then
   ( while kill -0 "$CODEX_PID" 2>/dev/null; do
       sleep 2
-      COUNT=$(PYTHONPATH="$HERE" python3 -c \
-        'from events import scan_tools; import sys; print(len(scan_tools(sys.argv[1], 0)[0]))' \
+      COUNT=$(PYTHONPATH="$HERE:$HERE/../.." python3 -c \
+        'from events import scan_tools; from recovery import scan_job_tools; import sys; print(len(scan_job_tools(sys.argv[1], scan_tools)))' \
         "$OUT/events.jsonl")
       if [ "$COUNT" -gt "$MAX_TOOLS" ]; then
         echo "tool budget: $COUNT completions exceeds $MAX_TOOLS, interrupting" >> "$OUT/stderr.log"
         touch "$OUT/.over-budget"
         kill -INT "$CODEX_PID" 2>/dev/null
         sleep 2
-        kill -KILL "$CODEX_PID" 2>/dev/null
+        python3 "$HERE/../../recovery.py" --hard-kill "$OUT" "$CODEX_PID"
         exit 0
       fi
     done ) &
@@ -422,13 +407,13 @@ trap cleanup EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
-if [ "${EARLY_DONE:-0}" = 1 ]; then CODE=$EARLY_CODE; else wait "$CODEX_PID"; CODE=$?; fi
+wait "$CODEX_PID"; CODE=$?
 OMP_REGISTRY_DIR="$REG" "$HERE/../../agents.sh" --unregister "$CODEX_PID" 2>/dev/null
 [ -n "${WATCHER:-}" ] && kill "$WATCHER" 2>/dev/null
 [ -n "${BUDGET_WATCHER:-}" ] && kill "$BUDGET_WATCHER" 2>/dev/null
 OVER_BUDGET=0
-TOOL_COMPLETIONS=$(PYTHONPATH="$HERE" python3 -c \
-  'from events import scan_tools; import sys; print(len(scan_tools(sys.argv[1], 0)[0]))' \
+TOOL_COMPLETIONS=$(PYTHONPATH="$HERE:$HERE/../.." python3 -c \
+  'from events import scan_tools; from recovery import scan_job_tools; import sys; print(len(scan_job_tools(sys.argv[1], scan_tools)))' \
   "$OUT/events.jsonl")
 if [ "$MAX_TOOLS" -gt 0 ] && [ "$TOOL_COMPLETIONS" -gt "$MAX_TOOLS" ]; then
   OVER_BUDGET=1
@@ -437,6 +422,7 @@ if [ "$MAX_TOOLS" -gt 0 ] && [ "$TOOL_COMPLETIONS" -gt "$MAX_TOOLS" ]; then
 fi
 [ -f "$OUT/.stalled" ] && { STALLED=1; rm -f "$OUT/.stalled"; }
 END=$(date +%s)
+rm -f "$OUT/.prompt-artifacts.md"
 
 python3 - "$OUT" "$LABEL" "$CWD" "$EFFORT" "$SANDBOX" "$CODE" "$((END - START))" \
          "$RESUME" "$STALLED" "$WORKTREE_BRANCH" "$BASE_SHA" "$MODEL" "$BASE_REF" \
@@ -446,9 +432,14 @@ import json, sys, pathlib
  model, base_ref, profile, scripts, over_budget) = sys.argv[1:17]
 sys.path.insert(0, scripts)
 from events import scan_tools
+sys.path.insert(0, str(pathlib.Path(scripts).parents[1]))
+from recovery import scan_job_tools, aggregate_usage
 out = pathlib.Path(out)
-thread, usage, errors, files, reconnects = None, {}, [], set(), 0
-tool_events, _ = scan_tools(out / "events.jsonl", 0)
+recovery = json.loads((out / "recovery.json").read_text())
+if recovery:
+    model = recovery[-1]["model"] or model
+thread, errors, files, reconnects = None, [], set(), 0
+tool_events = scan_job_tools(out / "events.jsonl", scan_tools)
 tool_calls = sum(event["ok"] for event in tool_events)
 failed_cmds = len(tool_events) - tool_calls
 for line in (out / "events.jsonl").read_text(errors="replace").splitlines():
@@ -461,8 +452,6 @@ for line in (out / "events.jsonl").read_text(errors="replace").splitlines():
         continue
     if ev.get("thread_id"):
         thread = ev["thread_id"]
-    if ev.get("type") == "turn.completed":
-        usage = ev.get("usage", {})
     # A failed command item is normal exploration, and a top-level `error` may be a retry
     # notice ("Reconnecting... 1/5"), not a terminal failure. Both are counted, not obeyed.
     if ev.get("type") == "error" and str(ev.get("message", "")).startswith("Reconnecting"):
@@ -474,6 +463,8 @@ for line in (out / "events.jsonl").read_text(errors="replace").splitlines():
         for ch in item.get("changes", []) or []:
             if isinstance(ch, dict) and ch.get("path"):
                 files.add(ch["path"])
+thread = thread or (recovery[-1]["session"] if recovery else None) or resume or None
+usage = aggregate_usage(out, 'codex')
 if thread:
     (out / "thread.txt").write_text(thread + "\n")
 result = out / "result.json" if (out / "result.json").exists() else out / "last.txt"
@@ -481,6 +472,7 @@ code = int(code)
 meta = {
     "label": label, "engine": "codex", "cwd": cwd, "effort": effort, "sandbox": sandbox, "model": model or None, "profile": profile or None,
     "resumed_from": resume or None, "exit_code": code, "duration_s": int(dur),
+    "recovery_attempts": recovery,
     "thread_id": thread, "usage": usage,
     "result_file": str(result) if result.exists() else None,
     "result_bytes": result.stat().st_size if result.exists() else 0,

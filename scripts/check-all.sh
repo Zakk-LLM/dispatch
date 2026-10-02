@@ -42,6 +42,7 @@ run "shell-syntax" sh scripts/check-shell-syntax.sh
 # temporary copy, so no tracked file is touched.
 if [ "${1:-}" != "--fast" ]; then
   run "controls" sh scripts/self-test.sh "$ENGINE"
+  run "offline-behavior" python3 scripts/test-behavior.py
 fi
 
 if [ "$fail" -ne 0 ]; then

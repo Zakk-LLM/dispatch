@@ -5,25 +5,33 @@
 `omp -p` waits on inherited stdin, so `agent.sh --engine omp` passes the prompt as an argument and
 redirects stdin from `/dev/null`.
 
-omp does have an internal deadline: the wrapper passes `--max-time` from `--timeout`, and the
-external `timeout` fires 60 seconds later as the backstop for a process that ignores its own
-limit.
-Exit code 124 or 137 means the wrapper killed it; `meta.json` reports `timed_out: true`, or
-`stalled: true` when `--stall` fired instead.
+See [timeout and shutdown](../SKILL.md#timeout-and-shutdown) for deadlines, grace and explicit guards.
 
 A repeated timeout is a decomposition problem, not a timeout-value problem.
 
+See [supervision](../SKILL.md#6-supervise-without-idling) for missing-completion `STALLED` and non-terminal `QUIET` notices.
+
+## The wrapper died without a report
+
+Editing the live dispatch checkout in place can kill Bash wrappers: Bash reads scripts
+incrementally. The observed symptom was `agent.sh: line N: unexpected EOF while looking for
+matching '"'` in the job's `.out`, with no `meta.json` or `last.txt`.
+
+Change dispatch in a separate worktree or copy. Update the installed checkout only by the
+[atomic replacement procedure](worktrees.md#when-to-use-it), when no job runs from it.
+Relaunch through a pinned copy with a prompt to continue from the working tree, preserving
+the original scope and uncommitted output. Review that output before relaunching; do not
+assume the failed wrapper produced no changes.
+
+`git checkout -- <file>` replaces the file with a new inode, so a running Bash process can
+keep reading the old inode. Truncating and rewriting the same inode is the failure mode;
+inode replacement is not a reason to update a live fleet checkout.
+
 ## `database is locked` when several agents start at once
 
-omp keeps session state in a shared store, and four processes reaching it in the same instant lose
-to a busy database. `agent.sh --engine omp` serializes launches machine-wide behind a short hold
-(`AGENT_START_STAGGER`, default 2 seconds) so a fan-out ramps in, and retries a launch that died
-on a lock with quadratic backoff (`AGENT_LOCK_RETRIES`, default 4). A retry is only attempted
-when the run produced no real events: a lock error happens before the model does anything, so
-repeating it repeats nothing, while retrying a run that had started working would duplicate it.
-Each failed attempt's stderr is kept as `stderr.attempt-<n>.log`.
-
-Verified: four simultaneous dispatches now all reach distinct sessions and exit 0.
+Launches are serialized behind `AGENT_START_STAGGER` (default 2 seconds). The shared recovery
+runner retries a database lock only before real events, so a retry cannot duplicate work.
+It uses the same attempt budget as service recovery below, not a second retry loop.
 
 ## The run hangs with no events at all
 
@@ -91,9 +99,36 @@ with `workspace-write`.
 
 ## Rate limits or auth failures
 
-`stderr.log` shows them plainly. Lower concurrency to two agents, and re-dispatch the failed
-labels only. The completed agents' results stay valid — never restart a whole run for one
-failed agent.
+The shared runner waits for the engine CLI to exit, then classifies structured engine errors
+and stderr. It does not add retries inside the engine's own reconnect loop.
+
+| Exit evidence | Action |
+|---|---|
+| Transient capacity, overload, rate limit or 429 | Backoff, resume the same session/model |
+| Exhausted quota, usage limit or insufficient quota/credits | Resume the same session on that model's configured fallback |
+| Authentication, context-length/token-limit errors, unsupported model, task error, timeout or interrupt | Stop; no automatic redrive |
+| Database lock before progress | Retry the launch; a session is not required |
+
+Service recovery requires a session ID; missing identity fails rather than starting fresh.
+Every attempt retains engine, worktree, permissions and the original job deadline.
+Resumes send a short continuation prompt naming the failure class, not the original task.
+Requested forks keep `--fork` until a new session ID is known; recovery never resumes the parent
+without the fork flag. Usage and cost in `meta.json` aggregate all attempts.
+`AGENT_RECOVERY_ATTEMPTS` limits total launches (default `AGENT_LOCK_RETRIES`, or 4).
+`AGENT_RECOVERY_BACKOFF` is the quadratic backoff multiplier in seconds (default 2).
+`--no-recovery` disables retries and fallback; JSON jobs use `no_recovery: true`.
+Fallback cycles stop. These settings and whitespace-separated `source=target` model pairs in
+`AGENT_FALLBACK_PAIRS` live in `${XDG_CONFIG_HOME:-~/.config}/agent-orchestration.env`.
+An unmapped exhausted model stops; the repo does not invent a fallback model.
+
+Each attempt keeps `events.attempt-<n>.jsonl`, `stderr.attempt-<n>.log` and a row in `recovery.json`
+with its model, session, exit classification and deadline. `meta.json.recovery_attempts` carries
+the same evidence. The canonical events/result files describe the final attempt. This replaces
+external quota watchers; do not run another resume loop around dispatch.
+Tool budgets count completed tools across every attempt, not only the resumed turn.
+
+Auth failures require fixing credentials. Completed labels remain valid; never restart a whole
+run for one failed label. See the [worker contract](review-gate.md#worker-contract) for `not run`.
 
 ## Reading the event log
 

@@ -67,6 +67,15 @@ commit、merge 與發佈。三個引擎共用執行目錄、難度分級、依�
 選擇 tier、設定檔、旗標或限制前，先讀 `references/engines/<engine>.md`。工作代理的輸出
 只是主張；協調者必須讀真實 diff、執行檢查並寫下審查結論。
 
+Git 寫入由協調者負責。用 `merge.sh` 提交審查過的輸出，明確選取新檔案；發佈是可選操作，
+完成後會驗證遠端 HEAD，詳見 [worktrees](references/worktrees.md)。所有 adapter 都會將
+路徑轉成絕對路徑，並將日誌放在儲存庫外的執行產物目錄。
+
+服務失敗採用[同一工作階段的有限恢復](references/troubleshooting.md#rate-limits-or-auth-failures)，
+設定寫在 `agent-orchestration.env`；`--no-recovery` 可停用恢復。長任務依執行器限制拆分。
+工作代理檢查受影響的行為，整合負責者執行完整 e2e。等待鎖或跳過的檢查記為 `not run`，
+不能記為通過。
+
 ## 安裝
 
 ```bash
@@ -86,7 +95,7 @@ sh scripts/check-all.sh
 ```
 
 這條命令會檢查共用入口契約、三份引擎表、工作代理提示範本的證據規則、shell 語法、
-混合引擎行為與 installer 生命週期控制。
+混合引擎行為、離線恢復與整合情境，以及 installer 生命週期控制。
 
 ## 授權
 

@@ -16,6 +16,26 @@ Specifically, none of these is a reason to accept:
 - another agent reviewed it and found nothing
 - the task was simple
 
+## Worker contract
+
+- **Git ownership:** only the orchestrator changes the index, history, branches or remotes.
+  Workers leave output uncommitted for `merge.sh`; do not grant them shared Git metadata access.
+- **Artifact scope:** declare `Write:` paths and an absolute `<run>/agents/<label>/artifacts/`
+  directory in each spec. Write logs and temporary evidence only there, never in the repository.
+  Adapters inject this path and the Git prohibition into prompts. Codex grants the artifact
+  directory with `--add-dir`; OpenCode uses external-directory permission; omp adds it with
+  `--add-dir` but has no OS sandbox.
+- **Targeted checks:** choose worker checks by affected behaviour, including callers and shared
+  fixtures, not just edited tests. Run acceptance commands and the `impact.sh` targets. When a
+  signature changes or no targets exist, exercise affected callers. If no targeted check exists,
+  report the limit and agree an integration check instead of waiting for the full-suite lock.
+  Stop after those checks; do not audit unrelated code. The integration owner runs targeted
+  `--check` commands per branch and full e2e/the full suite once via `--final-check` on the combined tree.
+- **Not run:** report every executed command and exit code, and list unverified behaviour.
+  Shared-lock/admission waits, unavailable resources and skipped commands are `not run`, never
+  passed. Record the reason with `verify.sh --not-run "CMD (reason)"`; exit 77 also marks a
+  scarce-resource wait or skip. Neither can produce `verified`. Report `blocked` for contradictions.
+
 ## Accepting a change
 
 1. **Read the diff, not the summary.** `git diff`, or the files themselves outside a
@@ -40,6 +60,7 @@ Specifically, none of these is a reason to accept:
 
 It writes `verify.json` with the changed files, the files outside scope, and every command with
 its exit code and output tail. Steps 1, 4, and 5 stay manual because they need judgment.
+See the [worker contract](#worker-contract) for unavailable checks and `not run` evidence.
 
 ### A worker will claim work it did not do
 
@@ -95,9 +116,7 @@ with the orchestrator.
 
 The task spec makes the worker's own verification checkable rather than rhetorical:
 
-- run the acceptance commands and report each one with its exact invocation and exit code
-- list what it could not verify, and why
-- report `blocked` instead of inventing a way around a contradiction
+- follow the [worker contract](#worker-contract) for commands, exit codes, unverified paths and blockers
 
 A worker that reports "verified" with no command is treated as having reported nothing.
 

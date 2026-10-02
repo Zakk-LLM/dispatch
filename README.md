@@ -74,6 +74,15 @@ Read `references/engines/<engine>.md` before choosing that engine's tier, profil
 limits. Worker output remains a claim: the orchestrator reads the real diff, runs the checks,
 and writes the verdict.
 
+Workers leave Git writes to the orchestrator. Use `merge.sh` for reviewed output, with explicit
+new-file selection and optional verified publishing; see [worktrees](references/worktrees.md).
+All adapters normalize paths and keep logs outside the repo in a run-artifact directory.
+
+Service failures use [bounded same-session recovery](references/troubleshooting.md#rate-limits-or-auth-failures),
+configured in `agent-orchestration.env`; `--no-recovery` disables it. Split long jobs by runner
+limits. Workers check affected behaviour; the integration owner runs full e2e. Lock waits and
+skipped checks are `not run`, not passed.
+
 ## Install
 
 ```bash
@@ -93,7 +102,8 @@ sh scripts/check-all.sh
 ```
 
 This command checks the shared entry contract, all three engine tables, the worker prompt
-evidence rules, shell syntax, mixed-engine behavior, and installer lifecycle controls.
+evidence rules, shell syntax, mixed-engine behavior, offline recovery and integration scenarios,
+and installer lifecycle controls.
 
 ## License
 

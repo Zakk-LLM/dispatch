@@ -16,6 +16,7 @@ the worker cannot see the project instructions you are following.>
 Read: <paths the worker may read>
 Write: <exact files or directories the worker may modify or create>
 Out of scope: <adjacent things it must leave alone>
+Artifacts: <absolute run>/agents/<label>/artifacts/
 
 ## Skills
 Read `<absolute path>/SKILL.md` before starting and follow it. <One line naming what it
@@ -36,26 +37,12 @@ finished. Do this even when it looks redundant.
 - <observable behavior>
 
 ## Verification you must perform
-Run every acceptance command yourself and report each one with its exact invocation and exit
-code. Do not report success from reading the code. List anything you could not verify and why.
-State `blocked` rather than inventing a way around a requirement that contradicts the code.
+Follow [Worker contract](<absolute dispatch>/references/review-gate.md#worker-contract) for Git ownership, artifact scope, targeted checks, `not run` and blockers.
 
 ## Regression check
 <Paste the output of `impact.sh --repo <repo> --format md` here.>
 
-Check only what your change can plausibly break, and find it mechanically rather than by
-reading the repository:
-
-1. Run the tests listed above plus the acceptance commands. Nothing else.
-2. When the list is empty or you changed a signature, find callers with one search
-   (`git grep -n -w '<symbol>'`) and read only the call sites it returns.
-3. Run the full suite only when the scope above says shared surface was touched, or when a
-   targeted run is impossible.
-4. Stop when the listed checks pass. Do not open files for reassurance, do not re-read your own
-   diff, and do not audit code you did not change.
-
-Report each command with its exit code, and state plainly what you did not check. An honest
-"callers in `x.py` were not exercised by any test" is worth more than a broad scan.
+Follow [Worker contract](<absolute dispatch>/references/review-gate.md#worker-contract) for regression checks and evidence.
 
 ## Environment (only for cloud or background workers)
 - Network: needed / not needed. Secrets visible by name: … External systems it may write to: …
@@ -64,8 +51,6 @@ Report each command with its exit code, and state plainly what you did not check
 Missing any of these means least privilege or local read-only, never "grant everything".
 
 ## Prohibitions
-- Do not run `git commit`, `git push`, `git rebase`, `git checkout`, or any git command that
-  changes history or the index.
 - Do not modify files outside the Write scope.
 - Do not add, upgrade, or remove dependencies.
 - Do not weaken, skip, or delete an existing test to make the suite pass.

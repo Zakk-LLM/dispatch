@@ -1,51 +1,69 @@
 #!/usr/bin/env bash
-# Block until at least one not-yet-handled agent finishes, then print its label and state,
-# one per line. Lets the orchestrator review agents as they land instead of waiting for the
-# slowest one.
+# Wait for completion; quiet live jobs only produce notices.
 set -uo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+exec python3 - "$HERE" "$@" <<'PY'
+import argparse
+import json
+from pathlib import Path
+import sys
+import time
+sys.path.insert(0, sys.argv.pop(1))
+from liveness import liveness
 
-usage() {
-  cat <<'EOF'
-Usage: wait.sh <run-dir> [--handled a,b,...] [--interval SEC] [--timeout SEC]
-
-Prints "<label> <state>" for every agent that has finished and is not in --handled,
-as soon as at least one exists. Exit 0 when something is printed, 1 on timeout,
-2 on a usage error. Feed the labels you already reviewed back in via --handled.
-EOF
-}
-
-RUN=${1:-}; shift || true
-[ -n "$RUN" ] || { usage >&2; exit 2; }
-[ "$RUN" = "-h" ] || [ "$RUN" = "--help" ] && { usage; exit 0; }
-
-HANDLED=""; INTERVAL=15; TIMEOUT=3600
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --handled) HANDLED=$2; shift 2 ;;
-    --interval) INTERVAL=$2; shift 2 ;;
-    --timeout) TIMEOUT=$2; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "unknown argument: $1" >&2; exit 2 ;;
-  esac
-done
-
-[ -d "$RUN/agents" ] || { echo "no agents under $RUN" >&2; exit 2; }
-
-WAITED=0
-while :; do
-  FOUND=0
-  for meta in "$RUN"/agents/*/meta.json; do
-    [ -f "$meta" ] || continue
-    label=$(basename "$(dirname "$meta")")
-    case ",$HANDLED," in *",$label,"*) continue ;; esac
-    code=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["exit_code"], int(bool(m.get("timed_out"))))' "$meta")
-    set -- $code
-    if [ "$1" = 0 ]; then state=OK; elif [ "$2" = 1 ]; then state=TIMEOUT; else state="FAIL($1)"; fi
-    printf '%s %s\n' "$label" "$state"
-    FOUND=1
-  done
-  [ "$FOUND" = 1 ] && exit 0
-  [ "$WAITED" -ge "$TIMEOUT" ] && exit 1
-  sleep "$INTERVAL"
-  WAITED=$((WAITED + INTERVAL))
-done
+parser = argparse.ArgumentParser(description="Print unhandled completed or stalled jobs.")
+parser.add_argument("run_dir", type=Path)
+parser.add_argument("--handled", default="")
+parser.add_argument("--interval", type=float, default=15)
+parser.add_argument("--timeout", type=float, default=3600)
+parser.add_argument("--stall", type=int, default=300,
+                    help="seconds without event growth before QUIET; 0 disables notices")
+args = parser.parse_args()
+if args.interval <= 0 or args.timeout < 0 or args.stall < 0:
+    parser.error("interval must be positive; timeout and stall must be nonnegative")
+agents = args.run_dir / "agents"
+if not agents.is_dir():
+    parser.error(f"no agents under {args.run_dir}")
+handled, progress = set(args.handled.split(",")), {}
+notices = {}
+deadline = time.monotonic() + args.timeout
+while True:
+    found = False
+    for agent in sorted(agents.iterdir()):
+        if not agent.is_dir() or agent.name in handled:
+            continue
+        try:
+            meta = json.loads((agent / "meta.json").read_text())
+        except (OSError, ValueError):
+            meta = None
+        if meta is not None:
+            code = meta.get("exit_code")
+            state = ("OK" if code == 0 else "STALLED" if meta.get("stalled") else
+                     "TIMEOUT" if meta.get("timed_out") else f"FAIL({code})")
+        else:
+            try:
+                started = json.loads((agent / "started.json").read_text())
+            except (OSError, ValueError):
+                if not (agent / "events.jsonl").exists():
+                    continue
+                started = {}
+            state, reason = liveness(agent, started, time.time(), args.stall, progress)
+            identity = (started.get('started_at'), state)
+            if state == 'QUIET':
+                if notices.get(agent.name) != identity:
+                    print(f'{agent.name} QUIET {reason}', flush=True)
+                    notices[agent.name] = identity
+                continue
+            notices.pop(agent.name, None)
+            if not state:
+                continue
+            state = f"{state} {reason}"
+        print(f"{agent.name} {state}")
+        found = True
+    if found:
+        raise SystemExit(0)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise SystemExit(1)
+    time.sleep(min(args.interval, remaining))
+PY

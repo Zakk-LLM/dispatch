@@ -12,10 +12,10 @@ Usage: dispatch.sh --engine omp|codex|opencode --run-dir DIR --jobs FILE [--weig
                          [--common "ARGS"] [--dry-run]
 
 FILE is JSONL, one job per line. `label` is required; `engine` defaults to --engine.
-Common keys: tier model cwd prompt_file timeout stall max_tools admission depends_on worktree resume.
-OMP-only keys: thinking role permission network allow_git.
+Common keys: tier model cwd prompt_file timeout stall max_tools admission depends_on worktree resume no_recovery.
+OMP-only keys: thinking role permission network add_dir.
 Codex-only keys: effort sandbox profile approve_for_me add_dir network.
-OpenCode-only keys: variant agent permission allow_cmd fork network allow_git.
+OpenCode-only keys: variant agent permission allow_cmd fork network.
 
 prompt_file defaults to <run-dir>/agents/<label>/prompt.md. Independent jobs run
 hardest-tier-first. Global concurrency is the larger engine capacity; each engine also keeps
@@ -67,11 +67,11 @@ default_engine = os.environ["DEFAULT_ENGINE"]
 # validates against the schema, omp and opencode only parse the result as JSON), and the
 # engine page says so. The honk-lab job files carry it on every line.
 common = {"tier", "model", "cwd", "prompt_file", "timeout", "stall", "max_tools",
-          "admission", "depends_on", "worktree", "resume", "schema"}
+          "admission", "depends_on", "worktree", "resume", "schema", "no_recovery"}
 specific = {
-    "omp": {"thinking", "role", "permission", "network", "allow_git"},
+    "omp": {"thinking", "role", "permission", "network", "add_dir"},
     "codex": {"effort", "sandbox", "profile", "approve_for_me", "add_dir", "network"},
-    "opencode": {"variant", "agent", "permission", "allow_cmd", "fork", "network", "allow_git"},
+    "opencode": {"variant", "agent", "permission", "allow_cmd", "fork", "network"},
 }
 jobs = []
 for n, line in enumerate(open(sys.argv[1]), 1):
@@ -119,8 +119,8 @@ for j in sorted(jobs, key=lambda j: order.get(j.get("tier", "standard"), 2)):
         a += ["--worktree"] if j["worktree"] is True else ["--worktree", str(j["worktree"])]
     if j.get("network"):
         a += ["--network"]
-    if j.get("allow_git"):
-        a += ["--allow-git"]
+    if j.get("no_recovery"):
+        a += ["--no-recovery"]
     if j.get("approve_for_me"):
         a += ["--approve-for-me"]
     if j.get("fork"):

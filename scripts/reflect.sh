@@ -7,8 +7,8 @@
 # note.sh in their own words. Nothing here kills or re-dispatches anything.
 #
 # Bounds are enforced, not requested: ten completed tools via the wrapper's --max-tools and
-# the recount after exit, 390 seconds total (300 for the model plus the wrapper's 60-second
-# outer timeout and 30-second grace), one launch (AGENT_LOCK_RETRIES=1). The result is read
+# the recount after exit, a 390-second outer deadline with a one-second kill backstop,
+# and one launch (--no-recovery). The result is read
 # from last.txt and validated here, because the wrapper's --schema only parses JSON and would
 # accept an empty verdict.
 set -uo pipefail
@@ -137,7 +137,7 @@ build_prompt || exit 2
 REFLECT_RUN="$RUN/reflect/$LABEL-$NUMBER"
 mkdir -p "$REFLECT_RUN" || exit 2
 ARGS=(--run-dir "$REFLECT_RUN" --label reflector --prompt-file "$PROMPT_OUT"
-      --admission refuse --timeout 300 --max-tools 10 --tier "$TIER"
+      --admission refuse --timeout 300 --max-tools 10 --tier "$TIER" --no-recovery
       --cwd "$REFLECT_RUN")
 case "$ENGINE" in
   omp) ARGS+=(--permission read-only --add-dir "$WORKER_CWD" --add-dir "$WORKER") ;;
@@ -152,7 +152,7 @@ if [ "$REMAINING" -le 0 ]; then
   AGENT_CODE=124
 else
   AGENT_START_STAGGER=0 AGENT_LOCK_RETRIES=1 \
-    timeout --signal=KILL "$REMAINING" "$HERE/agent.sh" --engine "$ENGINE" "${ARGS[@]}"
+    timeout --signal=INT --kill-after=1 "$REMAINING" "$HERE/agent.sh" --engine "$ENGINE" "${ARGS[@]}"
   AGENT_CODE=$?
 fi
 REFLECTOR="$REFLECT_RUN/agents/reflector"

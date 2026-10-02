@@ -72,6 +72,8 @@ in every sandbox, which is why a `read-only` research agent can still search. Ad
 `--approve-for-me` when a worker legitimately needs to escalate a command instead of failing,
 and grant write access to the smallest directory that contains the agent's files.
 
+Follow the [worker contract](../review-gate.md#worker-contract) for Git ownership, artifact scope, targeted checks and `not run`.
+
 `--timeout` is a runaway guard, not a schedule, and it scales with the task — not with your
 patience. A big task on a short timeout is the worst combination available: the wrapper kills
 the worker mid-edit, and you inherit a half-applied change with no final report.
@@ -79,7 +81,7 @@ the worker mid-edit, and you inherit a half-applied change with no final report.
 Estimate from the work, then roughly triple it, up to the ceiling: a worker spends most of its wall-clock reading
 the repository and running commands, not generating text.
 
-**Hard ceiling: 5400 seconds (90 minutes) for any worker.** A worker still running past that is treated as suspect, non-essential work — repeated full gate runs, ablation of every hunk, a sixth version of the report — and is killed on sight, not waited for; every extra round re-reads the whole context and burns tokens by the hour. You finish from what is in its worktree: commit by theme, push, let CI be the gate. Cap the verification in the spec itself: one full gate run, two or three ablations of the hunks that matter, one report, and the sentence "do not repeat a full round".
+See [timeout and shutdown](../../SKILL.md#timeout-and-shutdown) for the 5400-second ceiling and guards.
 
 
 ## Troubleshooting
@@ -91,23 +93,16 @@ the repository and running commands, not generating text.
 file on stdin, which closes at EOF; a hand-written invocation needs `< /dev/null` when the
 prompt is an argument.
 
-`codex exec` also has no internal time limit, so every invocation is wrapped in `timeout`. Exit
-code 124 or 137 means the wrapper killed it — `meta.json` reports `timed_out: true`.
+`codex exec` has no internal time limit. The shared runner enforces the original job deadline
+across attempts. Exit 124 or 137 records `timed_out: true` in `meta.json`.
 
 A repeated timeout is a decomposition problem, not a timeout-value problem. Split the task and
 re-dispatch.
 
 ## `database is locked` when several agents start at once
 
-Codex keeps session state in SQLite, and four processes reaching it in the same instant lose
-to a busy database. `codex_agent.sh` serializes launches machine-wide behind a short hold
-(`AGENT_START_STAGGER`, default 2 seconds) so a fan-out ramps in, and retries a launch that died
-on a lock with quadratic backoff (`AGENT_LOCK_RETRIES`, default 4). A retry is only attempted
-when the run produced no real events: a lock error happens before the model does anything, so
-repeating it repeats nothing, while retrying a run that had started working would duplicate it.
-Each failed attempt's stderr is kept as `stderr.attempt-<n>.log`.
-
-Verified: four simultaneous dispatches now all reach distinct sessions and exit 0.
+See [shared recovery](../troubleshooting.md#rate-limits-or-auth-failures). The same bounded
+mechanism handles startup database locks and service failures; retries do not reset the deadline.
 
 ## `error: unexpected argument '-C' found`
 
@@ -180,9 +175,8 @@ with `workspace-write`.
 
 ## Rate limits or auth failures
 
-`stderr.log` shows them plainly. Lower concurrency to two agents, and re-dispatch the failed
-labels only. The completed agents' results stay valid — never restart a whole run for one
-failed agent.
+See [shared recovery](../troubleshooting.md#rate-limits-or-auth-failures) for classification,
+fallback pairs, attempt evidence and `--no-recovery`. Auth failures are terminal.
 
 ## Reading the event log
 

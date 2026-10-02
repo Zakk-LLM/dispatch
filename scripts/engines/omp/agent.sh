@@ -34,12 +34,12 @@ Model and limits:
 Permissions (omp has no sandbox; the tool allowlist is the boundary):
   --permission MODE  read-only|workspace-write|full|bypass   (default: read-only)
   --network          allow web_search and web fetching
-  --allow-git        do not deny history-changing git commands (dangerous, off by default)
 
 Behavior:
   --schema FILE      JSON Schema the final message must satisfy; validated after the run
   --resume SESSION   continue an existing session id
   --admission MODE   wait|refuse|off - how to handle a full machine (default: wait)
+  --no-recovery      disable automatic bounded recovery
 
 Artifacts: prompt.md events.jsonl stderr.log thread.txt started.json meta.json
            result.json (with --schema) or last.txt (without); sessions live in <run>/sessions/
@@ -48,7 +48,7 @@ EOF
 
 RUN_DIR=; LABEL=; PROMPT_FILE=; PROMPT_TEXT=; CWD=$PWD
 THINKING=; THINKING_SET=0; MODEL=; ROLE=; TIMEOUT=1800; STALL=0; MAX_TOOLS=0; RESUME=
-SCHEMA=; TIER=; PERMISSION=read-only; NETWORK=0; ALLOW_GIT=0; ADMISSION=wait
+SCHEMA=; TIER=; PERMISSION=read-only; NETWORK=0; ADMISSION=wait; RECOVERY=1
 WORKTREE=; WORKTREE_BASE=HEAD; ALLOW_STALE=0; ADD_DIRS=()
 HERE=$(cd "$(dirname "$0")" && pwd)
 REG=${OMP_REGISTRY_DIR:-${XDG_RUNTIME_DIR:-/tmp}/omp-agents}
@@ -83,10 +83,10 @@ while [ $# -gt 0 ]; do
     --max-tools) MAX_TOOLS=$2; shift 2 ;;
     --permission) PERMISSION=$2; shift 2 ;;
     --network) NETWORK=1; shift ;;
-    --allow-git) ALLOW_GIT=1; shift ;;
     --schema) SCHEMA=$2; shift 2 ;;
     --resume) RESUME=$2; shift 2 ;;
     --admission) ADMISSION=$2; shift 2 ;;
+    --no-recovery) RECOVERY=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -162,6 +162,8 @@ case "$LABEL" in */*|.|..) echo "invalid label: $LABEL (no path separators)" >&2
 case "$MAX_TOOLS" in *[!0-9]*|"") echo "bad --max-tools: $MAX_TOOLS" >&2; exit 2 ;; esac
 [ "$PERMISSION" = bypass ] && echo "WARNING: $LABEL runs with every tool and no approvals" >&2
 
+# shellcheck source=../../adapter-startup.sh
+. "$HERE/../../adapter-startup.sh"
 CWD=$(cd "$CWD" && pwd) || exit 2
 OUT="$RUN_DIR/agents/$LABEL"
 mkdir -p "$OUT" || exit 2
@@ -171,6 +173,13 @@ if [ -n "$PROMPT_FILE" ]; then
 else
   printf '%s\n' "$PROMPT_TEXT" > "$OUT/prompt.md"
 fi
+ARTIFACT_DIR="$OUT/artifacts"
+mkdir -p "$ARTIFACT_DIR" || exit 2
+ADD_DIRS+=("$ARTIFACT_DIR")
+PROMPT_INPUT="$OUT/.prompt-artifacts.md"
+{ cat "$OUT/prompt.md"
+  printf '\n\nRun artifacts: %s\nWrite logs and temporary evidence only there, never in the repository.\nThe orchestrator owns all Git index, history, branch and remote writes; do not perform them.\n' "$ARTIFACT_DIR"
+} > "$PROMPT_INPUT"
 
 # omp has no sandbox: the tool allowlist is the boundary. Withholding the write tools is a
 # stronger guarantee than a permission rule, because the model cannot call what it lacks.
@@ -224,10 +233,9 @@ rm -f "$RESULT" "$OUT/thread.txt"
 
 # omp cannot enforce a schema on a print-mode answer, so the contract goes into the prompt and
 # the wrapper validates afterwards. Without the check a schema would be a suggestion.
-PROMPT_INPUT="$OUT/prompt.md"
 if [ -n "$SCHEMA" ]; then
   PROMPT_INPUT="$OUT/.prompt-with-schema.md"
-  { cat "$OUT/prompt.md"
+  { cat "$OUT/.prompt-artifacts.md"
     printf '\n\n## Output contract\nYour final message must be exactly one JSON object, no prose,\nno code fence, matching this schema:\n\n```json\n'
     cat "$SCHEMA"
     printf '\n```\n'
@@ -248,7 +256,7 @@ if [ -n "$ROLE" ]; then
   [ -f "$ROLE_FILE" ] || { echo "no such role: $ROLE_FILE" >&2; exit 2; }
   ARGS+=(--append-system-prompt "$ROLE_FILE")
 fi
-# omp's own limit stops the session cleanly; the outer timeout is the backstop for a hang.
+# Recovery reduces this internal limit to the remaining job deadline on each attempt.
 ARGS+=(--max-time "$TIMEOUT")
 # An approval prompt has nobody to answer it in print mode, so every profile runs without one.
 # The boundary is the tool allowlist above: a worker cannot call a tool it was not given.
@@ -282,6 +290,7 @@ if [ "$ADMISSION" != off ]; then
 fi
 
 START=$(date +%s)
+DEADLINE=$((START + TIMEOUT))
 
 # Session state is a shared store here too, so launches are serialized machine-wide.
 STAGGER=${AGENT_START_STAGGER:-2}
@@ -294,35 +303,11 @@ stagger_start() {
   exec {sfd}>&-
 }
 
-locked_without_progress() {
-  grep -qiE "database is locked|SQLITE_BUSY|database table is locked" "$OUT/stderr.log" \
-       "$OUT/events.jsonl" 2>/dev/null || return 1
-  ! grep -qE '"type":"(message_end|tool|turn_end)"' "$OUT/events.jsonl" 2>/dev/null
-}
-
-ATTEMPT=0
-MAX_ATTEMPTS=${AGENT_LOCK_RETRIES:-4}
-while :; do
-  ATTEMPT=$((ATTEMPT + 1))
-  stagger_start
-  # stdin must be closed: an inherited terminal stdin would keep the process waiting.
-  ( cd "$CWD" && timeout --signal=INT --kill-after=30 $((TIMEOUT + 60)) \
-      omp "${ARGS[@]}" "$(cat "$PROMPT_INPUT")" \
-      < /dev/null > "$OUT/events.jsonl" 2> "$OUT/stderr.log" ) &
-  AGENT_PID=$!
-  sleep 2
-  if kill -0 "$AGENT_PID" 2>/dev/null; then break; fi
-  wait "$AGENT_PID"; EARLY=$?
-  EARLY_DONE=1; EARLY_CODE=$EARLY
-  if [ "$EARLY" = 0 ] || [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ] || ! locked_without_progress; then
-    break
-  fi
-  EARLY_DONE=0
-  BACKOFF=$((ATTEMPT * ATTEMPT * 2))
-  echo "database locked on attempt $ATTEMPT/$MAX_ATTEMPTS, retrying in ${BACKOFF}s" >&2
-  cp "$OUT/stderr.log" "$OUT/stderr.attempt-$ATTEMPT.log" 2>/dev/null
-  sleep "$BACKOFF"
-done
+stagger_start
+( cd "$CWD" && exec python3 "$HERE/../../recovery.py" --engine omp --out "$OUT" \
+    --deadline "$DEADLINE" --prompt-input "$PROMPT_INPUT" "${RECOVERY_ARGS[@]}" -- \
+    omp "${ARGS[@]}" "$(cat "$PROMPT_INPUT")" ) &
+AGENT_PID=$!
 
 STALLED=0
 if [ "$STALL" -gt 0 ] 2>/dev/null; then
@@ -334,7 +319,7 @@ if [ "$STALL" -gt 0 ] 2>/dev/null; then
         echo "stall: no event for $((NOW - LAST))s, interrupting" >> "$OUT/stderr.log"
         touch "$OUT/.stalled"
         kill -INT "$AGENT_PID" 2>/dev/null
-        sleep 20; kill -KILL "$AGENT_PID" 2>/dev/null
+        sleep 30; python3 "$HERE/../../recovery.py" --hard-kill "$OUT" "$AGENT_PID"
         exit 0
       fi
     done ) &
@@ -349,15 +334,15 @@ fi
 if [ "$MAX_TOOLS" -gt 0 ] 2>/dev/null && kill -0 "$AGENT_PID" 2>/dev/null; then
   ( while kill -0 "$AGENT_PID" 2>/dev/null; do
       sleep 2
-      COUNT=$(PYTHONPATH="$HERE" python3 -c \
-        'from events import scan_tools; import sys; print(len(scan_tools(sys.argv[1], 0)[0]))' \
+      COUNT=$(PYTHONPATH="$HERE:$HERE/../.." python3 -c \
+        'from events import scan_tools; from recovery import scan_job_tools; import sys; print(len(scan_job_tools(sys.argv[1], scan_tools)))' \
         "$OUT/events.jsonl")
       if [ "$COUNT" -gt "$MAX_TOOLS" ]; then
         echo "tool budget: $COUNT completions exceeds $MAX_TOOLS, interrupting" >> "$OUT/stderr.log"
         touch "$OUT/.over-budget"
         kill -INT "$AGENT_PID" 2>/dev/null
         sleep 2
-        kill -KILL "$AGENT_PID" 2>/dev/null
+        python3 "$HERE/../../recovery.py" --hard-kill "$OUT" "$AGENT_PID"
         exit 0
       fi
     done ) &
@@ -394,13 +379,13 @@ trap cleanup EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
-if [ "${EARLY_DONE:-0}" = 1 ]; then CODE=$EARLY_CODE; else wait "$AGENT_PID"; CODE=$?; fi
+wait "$AGENT_PID"; CODE=$?
 "$HERE/../../agents.sh" --unregister "$AGENT_PID" 2>/dev/null
 [ -n "${WATCHER:-}" ] && kill "$WATCHER" 2>/dev/null
 [ -n "${BUDGET_WATCHER:-}" ] && kill "$BUDGET_WATCHER" 2>/dev/null
 OVER_BUDGET=0
-TOOL_COMPLETIONS=$(PYTHONPATH="$HERE" python3 -c \
-  'from events import scan_tools; import sys; print(len(scan_tools(sys.argv[1], 0)[0]))' \
+TOOL_COMPLETIONS=$(PYTHONPATH="$HERE:$HERE/../.." python3 -c \
+  'from events import scan_tools; from recovery import scan_job_tools; import sys; print(len(scan_job_tools(sys.argv[1], scan_tools)))' \
   "$OUT/events.jsonl")
 if [ "$MAX_TOOLS" -gt 0 ] && [ "$TOOL_COMPLETIONS" -gt "$MAX_TOOLS" ]; then
   OVER_BUDGET=1
@@ -409,7 +394,7 @@ if [ "$MAX_TOOLS" -gt 0 ] && [ "$TOOL_COMPLETIONS" -gt "$MAX_TOOLS" ]; then
 fi
 [ -f "$OUT/.stalled" ] && { STALLED=1; rm -f "$OUT/.stalled"; }
 END=$(date +%s)
-rm -f "$OUT/.prompt-with-schema.md"
+rm -f "$OUT/.prompt-with-schema.md" "$OUT/.prompt-artifacts.md"
 
 python3 - "$OUT" "$LABEL" "$CWD" "$THINKING" "$PERMISSION" "$CODE" "$((END - START))" \
          "$RESUME" "$STALLED" "$WORKTREE_BRANCH" "$BASE_SHA" "$MODEL" "$BASE_REF" \
@@ -419,12 +404,17 @@ import json, sys, pathlib
  model, base_ref, schema, role, scripts, over_budget) = sys.argv[1:18]
 sys.path.insert(0, scripts)
 from events import scan_tools
+sys.path.insert(0, str(pathlib.Path(scripts).parents[1]))
+from recovery import scan_job_tools, aggregate_usage
 out = pathlib.Path(out)
-session, usage, errors, files, reconnects = None, {}, [], set(), 0
-tool_events, _ = scan_tools(out / "events.jsonl", 0)
+recovery = json.loads((out / "recovery.json").read_text())
+if recovery:
+    model = recovery[-1]["model"] or model
+session, errors, files, reconnects = None, [], set(), 0
+tool_events = scan_job_tools(out / "events.jsonl", scan_tools)
 tool_calls = sum(event["ok"] for event in tool_events)
 failed_tools = len(tool_events) - tool_calls
-texts, cost, yielded = [], 0.0, None
+texts, yielded = [], None
 for line in (out / "events.jsonl").read_text(errors="replace").splitlines():
     line = line.strip()
     if not line.startswith("{"):
@@ -447,12 +437,6 @@ for line in (out / "events.jsonl").read_text(errors="replace").splitlines():
             continue
         if m.get("role") != "assistant":
             continue
-        u = m.get("usage") or {}
-        # Later messages carry the running totals for that message; sum them for the run.
-        usage = {"input_tokens": usage.get("input_tokens", 0) + u.get("input", 0),
-                 "output_tokens": usage.get("output_tokens", 0) + u.get("output", 0),
-                 "cached_input_tokens": usage.get("cached_input_tokens", 0) + u.get("cacheRead", 0)}
-        cost += ((u.get("cost") or {}).get("total") or 0)
         for c in m.get("content", []):
             if c.get("type") == "text" and c.get("text"):
                 texts.append(c["text"])
@@ -480,8 +464,8 @@ for line in (out / "events.jsonl").read_text(errors="replace").splitlines():
             reconnects += 1
         else:
             errors.append(ev)
-if usage:
-    usage["cost"] = round(cost, 6)
+session = session or (recovery[-1]["session"] if recovery else None) or resume or None
+usage = aggregate_usage(out, 'omp')
 if session:
     (out / "thread.txt").write_text(session + "\n")
 
@@ -513,6 +497,7 @@ code = int(code)
 meta = {
     "label": label, "engine": "omp", "cwd": cwd, "effort": thinking or "default", "sandbox": permission,
     "model": model or None, "role": role or None, "resumed_from": resume or None,
+    "recovery_attempts": recovery,
     "exit_code": code, "duration_s": int(dur), "thread_id": session, "usage": usage,
     "result_file": str(result) if result.exists() else None,
     "result_bytes": result.stat().st_size if result.exists() else 0,

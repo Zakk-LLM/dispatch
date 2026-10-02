@@ -36,23 +36,37 @@ Skip it for read-only agents, for a single writer with nothing else running, and
 is so expensive that a fresh checkout costs more than serializing the work — each worktree needs
 its own dependency install and build output.
 
+Dispatch itself is an exception to the single-writer shortcut: edit it in a separate worktree
+or pinned copy, never the checkout the running fleet executes. For the checkout behind
+`~/.claude/skills/dispatch`, install a complete new directory and atomically rename a replacement
+symlink over the old link only when no job runs from it. Do not update live scripts in place.
+See [incident recovery](troubleshooting.md#the-wrapper-died-without-a-report).
+
 ## Merging
 
 Review each branch on its own, then integrate deliberately:
 
-Agents are forbidden from committing, so their work is still uncommitted in the worktree: a
-branch diff alone shows nothing. Look at the working tree, then let `merge.sh` commit and
-integrate it, or commit it yourself first.
+Follow the [worker contract](review-gate.md#worker-contract) for Git ownership, artifact scope, targeted checks and `not run`.
 
 ```sh
 "$DISPATCH_SKILL/scripts/worktrees.sh" "$RUN" --diff main   # branch diff plus uncommitted work
 "$DISPATCH_SKILL/scripts/merge.sh" --run-dir "$RUN" --repo /path/to/repo --into main \
-  --check "pytest -q"                                          # commits, merges, verifies, rolls back
+  --final-check "pytest -q"                                   # full suite once on the combined tree
 ```
 
-Merge in dependency order, run the tests after each merge rather than only at the end, and when
-two branches touch one file, resolve it yourself instead of asking an agent to "fix the
-conflict" — the agent that wrote one side cannot see why the other side exists.
+
+`merge.sh` prints status, untracked files and the complete staged set, including files staged
+earlier. It stages tracked changes and literal reviewed new files selected with `--include label:path`.
+If new files exist and none are included, it fails with their list unless `--ignore-untracked`
+is explicit. `--artifact-check CMD` enforces repository policy on the staged set.
+A staging or policy failure stops before commit. The helper checks the expected branch, staged
+tree and resulting commit parent/tree. Optional `--push REMOTE` publishes the checked target and
+requires its remote head to match. Local integration does not publish without this option.
+
+`merge.sh` and mutating `worktrees.sh` operations take one lock per Git common directory,
+resolved by `git rev-parse`. They refuse unfinished Git operations and live workers.
+`worktrees.sh --rebase` requires clean, already committed output; it never stages files.
+Failed rebase or checks roll back the integration target, not the worker commits or remote refs.
 
 ## Cleanup
 
@@ -63,17 +77,13 @@ Worktrees, branches, and their build output persist until removed:
 "$DISPATCH_SKILL/scripts/worktrees.sh" "$RUN" --remove-merged main
 ```
 
-Remove them once the work is merged or abandoned. A run directory full of stale worktrees is
-a disk problem on any machine and a snapshot problem on filesystems that snapshot the home
-directory.
+Both removal modes attempt every eligible worktree and delete its branch. `--remove-merged`
+keeps unmerged branches; `--remove-all` also deletes unmerged branches. Dirty/live worktrees
+and Git failures cause non-zero exit without preventing other eligible removals.
 
 ## Permission interaction
 
-A worktree lives under the run directory, and the agent's `--cwd` is the worktree itself, so a
-`workspace-write` profile edits there and nowhere else that matters. Note the difference from an
-OS sandbox: nothing physically prevents a permitted shell command from writing outside the
-worktree, so the review gate compares the changed files against the declared scope rather than
-trusting the boundary.
+See the [worker contract](review-gate.md#worker-contract) for Git and artifact access boundaries.
 
 Submodules are the known exception: git documents incomplete support for multiple superproject
 checkouts, so a submodule-heavy repository needs a plain clone per agent instead.

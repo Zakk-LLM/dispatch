@@ -34,10 +34,9 @@ Permissions (opencode has no sandbox; these are its equivalent):
                      inspect runs commands but has no edit tool: the profile for auditing,
                      testing, and linting. read-only additionally denies every command that is
                      not plain inspection.
-                     bypass allows everything including git history commands and adds --auto.
+                     bypass adds --auto; Git writes still belong to the orchestrator.
                      Dangerous, never a default.
   --network          allow webfetch
-  --allow-git        do not deny history-changing git commands (dangerous, off by default)
   --allow-cmd PAT    allow one more shell pattern in this run, e.g. --allow-cmd "python3 *"
                      (repeatable; a read-only profile denies everything else by default)
 
@@ -46,6 +45,7 @@ Behavior:
   --resume SESSION   continue an existing session id
   --fork             fork the resumed session instead of extending it
   --admission MODE   wait|refuse|off - how to handle a full machine (default: wait)
+  --no-recovery      disable automatic bounded recovery
 
 Artifacts: prompt.md events.jsonl stderr.log thread.txt started.json meta.json
            result.json (with --schema) or last.txt (without)
@@ -54,8 +54,8 @@ EOF
 
 RUN_DIR=; LABEL=; PROMPT_FILE=; PROMPT_TEXT=; CWD=$PWD
 VARIANT=; VARIANT_SET=0; MODEL=; AGENT=; TIMEOUT=1800; STALL=0; MAX_TOOLS=0; RESUME=; FORK=0
-SCHEMA=; TIER=; PERMISSION=inspect; NETWORK=0; ALLOW_GIT=0; ADMISSION=wait; ALLOW_CMDS=()
-WORKTREE=; WORKTREE_BASE=HEAD; ALLOW_STALE=0
+SCHEMA=; TIER=; PERMISSION=inspect; NETWORK=0; ADMISSION=wait; ALLOW_CMDS=(); RECOVERY=1
+WORKTREE=; WORKTREE_BASE=HEAD; ALLOW_STALE=0; ADD_DIRS=()
 HERE=$(cd "$(dirname "$0")" && pwd)
 REG=${OPENCODE_REGISTRY_DIR:-${XDG_RUNTIME_DIR:-/tmp}/opencode-agents}
 
@@ -88,12 +88,12 @@ while [ $# -gt 0 ]; do
     --max-tools) MAX_TOOLS=$2; shift 2 ;;
     --permission) PERMISSION=$2; shift 2 ;;
     --network) NETWORK=1; shift ;;
-    --allow-git) ALLOW_GIT=1; shift ;;
     --allow-cmd) ALLOW_CMDS+=("$2"); shift 2 ;;
     --schema) SCHEMA=$2; shift 2 ;;
     --resume) RESUME=$2; shift 2 ;;
     --fork) FORK=1; shift ;;
     --admission) ADMISSION=$2; shift 2 ;;
+    --no-recovery) RECOVERY=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -130,6 +130,8 @@ case "$ADMISSION" in wait|refuse|off) ;; *) echo "bad --admission: $ADMISSION (w
 case "$LABEL" in */*|.|..) echo "invalid label: $LABEL (no path separators)" >&2; exit 2 ;; esac
 case "$MAX_TOOLS" in *[!0-9]*|"") echo "bad --max-tools: $MAX_TOOLS" >&2; exit 2 ;; esac
 
+# shellcheck source=../../adapter-startup.sh
+. "$HERE/../../adapter-startup.sh"
 CWD=$(cd "$CWD" && pwd) || exit 2
 OUT="$RUN_DIR/agents/$LABEL"
 mkdir -p "$OUT" || exit 2
@@ -139,6 +141,12 @@ if [ -n "$PROMPT_FILE" ]; then
 else
   printf '%s\n' "$PROMPT_TEXT" > "$OUT/prompt.md"
 fi
+ARTIFACT_DIR="$OUT/artifacts"
+mkdir -p "$ARTIFACT_DIR" || exit 2
+PROMPT_INPUT="$OUT/.prompt-artifacts.md"
+{ cat "$OUT/prompt.md"
+  printf '\n\nRun artifacts: %s\nWrite logs and temporary evidence only there, never in the repository.\nThe orchestrator owns all Git index, history, branch and remote writes; do not perform them.\n' "$ARTIFACT_DIR"
+} > "$PROMPT_INPUT"
 
 # opencode has no sandbox: permission rules are the boundary, and they are merged into the
 # user's config for this run only. "ask" must never appear — a non-interactive run would hang
@@ -157,15 +165,15 @@ if [ -z "$AGENT" ]; then
 fi
 
 ALLOW_CMDS_JSON=$(python3 -c 'import json,sys; json.dump(sys.argv[1:], sys.stdout)' ${ALLOW_CMDS+"${ALLOW_CMDS[@]}"})
-PERM_JSON=$(PERMISSION="$PERMISSION" NETWORK="$NETWORK" ALLOW_GIT="$ALLOW_GIT" \
+PERM_JSON=$(PERMISSION="$PERMISSION" NETWORK="$NETWORK" ARTIFACT_DIR="$ARTIFACT_DIR" \
             ALLOW_CMDS="$ALLOW_CMDS_JSON" python3 -c '
 import json, os
-mode, network, allow_git = os.environ["PERMISSION"], os.environ["NETWORK"], os.environ["ALLOW_GIT"]
+mode, network = os.environ["PERMISSION"], os.environ["NETWORK"]
 # History-changing git is denied for the same reason every task spec forbids it: the
 # orchestrator owns commits, merges, and branches.
 GIT_DENY = {f"git {c}*": "deny" for c in
-            ("commit", "push", "rebase", "checkout", "switch", "reset", "merge", "cherry-pick",
-             "stash", "tag", "branch -d", "branch -D", "clean")}
+            ("add", "commit", "push", "fetch", "pull", "rebase", "checkout", "switch", "reset",
+             "merge", "cherry-pick", "stash", "tag", "branch", "clean", "worktree")}
 DESTRUCTIVE = {"rm -rf *": "deny", "sudo *": "deny", "shutdown*": "deny", "reboot*": "deny"}
 if mode == "inspect":
     # An auditor has to run the tests and the linter it is judging by. The edit tools are gone
@@ -173,8 +181,7 @@ if mode == "inspect":
     # write a file, so the scope check in the review gate is what actually catches that.
     bash = {"*": "allow"}
     bash.update(DESTRUCTIVE)
-    if allow_git != "1":
-        bash.update(GIT_DENY)
+    bash.update(GIT_DENY)
     perm = {"edit": "deny", "bash": bash}
 elif mode == "read-only":
     bash = {"*": "deny"}
@@ -191,23 +198,20 @@ elif mode == "read-only":
 elif mode == "workspace-write":
     bash = {"*": "allow"}
     bash.update(DESTRUCTIVE)
-    if allow_git != "1":
-        bash.update(GIT_DENY)
+    bash.update(GIT_DENY)
     perm = {"edit": "allow", "bash": bash}
 else:
-    # full and bypass both allow everything; bypass additionally drops the git denials, which
-    # `full` keeps because the orchestrator still owns commits.
     perm = {"edit": "allow", "bash": {"*": "allow"}}
-    if mode == "full" and allow_git != "1":
-        perm["bash"].update(GIT_DENY)
+    perm["bash"].update(GIT_DENY)
 perm["webfetch"] = "allow" if network == "1" else "deny"
 # Nothing may resolve to "ask": a non-interactive run has nobody to answer, and the agent would
 # sit until the timeout kills it. These two default to ask in opencode.
-# Anything the orchestrator explicitly allowed for this run, added last so it wins.
+# Extra command allowances do not grant ownership of Git side effects.
 for pattern in json.loads(os.environ.get("ALLOW_CMDS") or "[]"):
     perm.setdefault("bash", {})[pattern] = "allow"
+perm.setdefault("bash", {}).update(GIT_DENY)
 perm["doom_loop"] = "deny"          # a suspected runaway loop stops rather than waiting
-perm["external_directory"] = "allow"  # specs point workers at skill files outside the workspace
+perm["external_directory"] = "allow"  # no sandbox; includes the run-artifact directory
 print(json.dumps({"permission": perm}))
 ') || exit 2
 
@@ -248,10 +252,9 @@ rm -f "$RESULT" "$OUT/thread.txt"
 
 # opencode has no --output-schema, so the schema goes into the prompt and the wrapper checks
 # only that the answer is valid JSON afterwards.
-PROMPT_INPUT="$OUT/prompt.md"
 if [ -n "$SCHEMA" ]; then
   PROMPT_INPUT="$OUT/.prompt-with-schema.md"
-  { cat "$OUT/prompt.md"
+  { cat "$OUT/.prompt-artifacts.md"
     printf '\n\n## Output contract\nYour final message must be exactly one JSON object, no prose,\nno code fence, matching this schema:\n\n```json\n'
     cat "$SCHEMA"
     printf '\n```\n'
@@ -290,6 +293,7 @@ if [ "$ADMISSION" != off ]; then
 fi
 
 START=$(date +%s)
+DEADLINE=$((START + TIMEOUT))
 
 # opencode keeps its session state in SQLite, and several processes reaching it in the same
 # instant lose to "database is locked". Starts are therefore serialized machine-wide with a
@@ -304,41 +308,12 @@ stagger_start() {
   exec {sfd}>&-
 }
 
-# A lock error happens before the model does anything, so retrying costs nothing and repeats
-# nothing. Any run that produced real events is never retried: that would duplicate work.
-locked_without_progress() {
-  grep -qiE "database is locked|SQLITE_BUSY|database table is locked" "$OUT/stderr.log" \
-       "$OUT/events.jsonl" 2>/dev/null || return 1
-  ! grep -qE '"type":"(tool_use|text|step_finish)"' "$OUT/events.jsonl" 2>/dev/null
-}
-
-ATTEMPT=0
-MAX_ATTEMPTS=${AGENT_LOCK_RETRIES:-4}
-while :; do
-  ATTEMPT=$((ATTEMPT + 1))
-  stagger_start
-  # stdin must be closed: an inherited terminal stdin makes `opencode run` wait forever, exactly
-  # as it does for codex. The prompt is passed as an argument, not on stdin.
-  ( cd "$CWD" && OPENCODE_CONFIG_CONTENT="$PERM_JSON" \
-      timeout --signal=INT --kill-after=30 "$TIMEOUT" \
-      opencode "${ARGS[@]}" "$(cat "$PROMPT_INPUT")" \
-      < /dev/null > "$OUT/events.jsonl" 2> "$OUT/stderr.log" ) &
-  AGENT_PID=$!
-  # Only a launch that dies immediately can be a lock collision; a long run is real work.
-  sleep 2
-  if kill -0 "$AGENT_PID" 2>/dev/null; then break; fi
-  # Already finished: reap it once and remember the status, or the final wait would report 127.
-  wait "$AGENT_PID"; EARLY=$?
-  EARLY_DONE=1; EARLY_CODE=$EARLY
-  if [ "$EARLY" = 0 ] || [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ] || ! locked_without_progress; then
-    break
-  fi
-  EARLY_DONE=0
-  BACKOFF=$((ATTEMPT * ATTEMPT * 2))
-  echo "database locked on attempt $ATTEMPT/$MAX_ATTEMPTS, retrying in ${BACKOFF}s" >&2
-  cp "$OUT/stderr.log" "$OUT/stderr.attempt-$ATTEMPT.log" 2>/dev/null
-  sleep "$BACKOFF"
-done
+stagger_start
+( cd "$CWD" && OPENCODE_CONFIG_CONTENT="$PERM_JSON" \
+    exec python3 "$HERE/../../recovery.py" --engine opencode --out "$OUT" \
+    --deadline "$DEADLINE" --prompt-input "$PROMPT_INPUT" "${RECOVERY_ARGS[@]}" -- \
+    opencode "${ARGS[@]}" "$(cat "$PROMPT_INPUT")" ) &
+AGENT_PID=$!
 
 STALLED=0
 if [ "$STALL" -gt 0 ] 2>/dev/null; then
@@ -350,7 +325,7 @@ if [ "$STALL" -gt 0 ] 2>/dev/null; then
         echo "stall: no event for $((NOW - LAST))s, interrupting" >> "$OUT/stderr.log"
         touch "$OUT/.stalled"
         kill -INT "$AGENT_PID" 2>/dev/null
-        sleep 20; kill -KILL "$AGENT_PID" 2>/dev/null
+        sleep 30; python3 "$HERE/../../recovery.py" --hard-kill "$OUT" "$AGENT_PID"
         exit 0
       fi
     done ) &
@@ -362,15 +337,15 @@ fi
 if [ "$MAX_TOOLS" -gt 0 ] 2>/dev/null && kill -0 "$AGENT_PID" 2>/dev/null; then
   ( while kill -0 "$AGENT_PID" 2>/dev/null; do
       sleep 2
-      COUNT=$(PYTHONPATH="$HERE" python3 -c \
-        'from events import scan_tools; import sys; print(len(scan_tools(sys.argv[1], 0)[0]))' \
+      COUNT=$(PYTHONPATH="$HERE:$HERE/../.." python3 -c \
+        'from events import scan_tools; from recovery import scan_job_tools; import sys; print(len(scan_job_tools(sys.argv[1], scan_tools)))' \
         "$OUT/events.jsonl")
       if [ "$COUNT" -gt "$MAX_TOOLS" ]; then
         echo "tool budget: $COUNT completions exceeds $MAX_TOOLS, interrupting" >> "$OUT/stderr.log"
         touch "$OUT/.over-budget"
         kill -INT "$AGENT_PID" 2>/dev/null
         sleep 2
-        kill -KILL "$AGENT_PID" 2>/dev/null
+        python3 "$HERE/../../recovery.py" --hard-kill "$OUT" "$AGENT_PID"
         exit 0
       fi
     done ) &
@@ -407,13 +382,13 @@ trap cleanup EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
-if [ "${EARLY_DONE:-0}" = 1 ]; then CODE=$EARLY_CODE; else wait "$AGENT_PID"; CODE=$?; fi
+wait "$AGENT_PID"; CODE=$?
 OMP_REGISTRY_DIR="$REG" "$HERE/../../agents.sh" --unregister "$AGENT_PID" 2>/dev/null
 [ -n "${WATCHER:-}" ] && kill "$WATCHER" 2>/dev/null
 [ -n "${BUDGET_WATCHER:-}" ] && kill "$BUDGET_WATCHER" 2>/dev/null
 OVER_BUDGET=0
-TOOL_COMPLETIONS=$(PYTHONPATH="$HERE" python3 -c \
-  'from events import scan_tools; import sys; print(len(scan_tools(sys.argv[1], 0)[0]))' \
+TOOL_COMPLETIONS=$(PYTHONPATH="$HERE:$HERE/../.." python3 -c \
+  'from events import scan_tools; from recovery import scan_job_tools; import sys; print(len(scan_job_tools(sys.argv[1], scan_tools)))' \
   "$OUT/events.jsonl")
 if [ "$MAX_TOOLS" -gt 0 ] && [ "$TOOL_COMPLETIONS" -gt "$MAX_TOOLS" ]; then
   OVER_BUDGET=1
@@ -422,7 +397,7 @@ if [ "$MAX_TOOLS" -gt 0 ] && [ "$TOOL_COMPLETIONS" -gt "$MAX_TOOLS" ]; then
 fi
 [ -f "$OUT/.stalled" ] && { STALLED=1; rm -f "$OUT/.stalled"; }
 END=$(date +%s)
-rm -f "$OUT/.prompt-with-schema.md"
+rm -f "$OUT/.prompt-with-schema.md" "$OUT/.prompt-artifacts.md"
 
 python3 - "$OUT" "$LABEL" "$CWD" "$VARIANT" "$PERMISSION" "$CODE" "$((END - START))" \
          "$RESUME" "$STALLED" "$WORKTREE_BRANCH" "$BASE_SHA" "$MODEL" "$BASE_REF" \
@@ -432,9 +407,14 @@ import json, sys, pathlib
  model, base_ref, schema, scripts, over_budget) = sys.argv[1:17]
 sys.path.insert(0, scripts)
 from events import scan_tools
+sys.path.insert(0, str(pathlib.Path(scripts).parents[1]))
+from recovery import scan_job_tools, aggregate_usage
 out = pathlib.Path(out)
-session, usage, errors, files, reconnects = None, {}, [], set(), 0
-tool_events, _ = scan_tools(out / "events.jsonl", 0)
+recovery = json.loads((out / "recovery.json").read_text())
+if recovery:
+    model = recovery[-1]["model"] or model
+session, errors, files, reconnects = None, [], set(), 0
+tool_events = scan_job_tools(out / "events.jsonl", scan_tools)
 tool_calls = sum(event["ok"] for event in tool_events)
 failed_cmds = len(tool_events) - tool_calls
 texts = []
@@ -449,14 +429,7 @@ for line in (out / "events.jsonl").read_text(errors="replace").splitlines():
     session = session or ev.get("sessionID")
     part = ev.get("part") or {}
     kind = ev.get("type")
-    if kind == "step_finish":
-        # The last step carries the run's totals; earlier ones are per-step.
-        tok = part.get("tokens") or {}
-        usage = {"input_tokens": tok.get("input", 0), "output_tokens": tok.get("output", 0),
-                 "reasoning_output_tokens": tok.get("reasoning", 0),
-                 "cached_input_tokens": (tok.get("cache") or {}).get("read", 0),
-                 "cost": part.get("cost", 0)}
-    elif kind == "text":
+    if kind == "text":
         texts.append(part.get("text") or "")
     elif kind == "error":
         message = str((ev.get("error") or {}).get("data", {}).get("message", ""))
@@ -481,6 +454,8 @@ for line in (out / "events.jsonl").read_text(errors="replace").splitlines():
         elif tool == "bash":
             # A command can write too; the review gate catches that from git, not from here.
             pass
+session = session or (recovery[-1]["session"] if recovery else None) or resume or None
+usage = aggregate_usage(out, 'opencode')
 if session:
     (out / "thread.txt").write_text(session + "\n")
 
@@ -505,6 +480,7 @@ meta = {
     "label": label, "engine": "opencode", "cwd": cwd,
     "effort": variant or "default", "sandbox": permission,
     "model": model or None, "resumed_from": resume or None, "exit_code": code,
+    "recovery_attempts": recovery,
     "duration_s": int(dur), "thread_id": session, "usage": usage,
     "result_file": str(result) if result.exists() else None,
     "result_bytes": result.stat().st_size if result.exists() else 0,

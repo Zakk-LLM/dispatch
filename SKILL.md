@@ -5,8 +5,7 @@ description: Drive the omp, Codex, or OpenCode CLI as a fleet of worker agents w
 
 # Dispatch orchestration
 
-Workers write; you plan, supervise, review, and ship. Workers never commit, never push, never
-deploy, and never decide that their own output is acceptable.
+Workers write; you plan, supervise, review, and ship. Follow the [worker contract](references/review-gate.md#worker-contract); workers never deploy or approve their own output.
 
 One run directory, tiers by difficulty, dependency ordering, bounded waiting, an evidence-based
 review gate, and atomic integration are shared across all three engines.
@@ -29,6 +28,10 @@ The old skill names `omp`, `codex`, and `opencode` mean this skill with the corr
 | `opencode` | `read-only` is plan mode; `inspect` runs commands | planning in `read-only`, tests and linters in `inspect` |
 
 Read `references/engines/<engine>.md` before choosing its tier, profile, flags, or limits.
+
+Keep Claude `coder` jobs focused: its turn cap can stop a long task without a final report.
+Use an external runner for longer implementation, but split gate-heavy work into bounded jobs.
+omp has a 5400-second ceiling, not unlimited runtime. Git mechanics stay with the orchestrator.
 
 ## What delegating buys you
 
@@ -131,7 +134,7 @@ rule: work is built only on a dependency's finished result or the target's real 
 Create one file per agent from [references/prompt-template.md](references/prompt-template.md),
 including the scope fence, executable acceptance criteria, live-notes block, and prohibitions.
 Paste the regression scope from `impact.sh --repo <repo> --format md` rather than asking a worker
-to discover it. Each worker runs targeted checks; the full suite runs once at integration.
+to discover it. Follow the [worker contract](references/review-gate.md#worker-contract) for Git ownership, artifact scope, targeted checks and `not run`.
 
 ### 4. Pick the engine, tier, profile, and limits
 
@@ -147,9 +150,21 @@ dispatched blind against a nearly exhausted quota stalls mid-run; a thirty-secon
 picks the ladder that will actually finish.
 
 Tier names are shared, but their model, thinking, effort, or variant bindings are engine-specific.
-Profile names and resume identifiers are not portable across engines. `--timeout` also has
-different outer grace periods. Codex enforces its supported JSON Schema subset; omp and OpenCode
-only check that the final result parses as JSON.
+Profile names and resume identifiers are not portable across engines. Codex enforces its
+supported JSON Schema subset; omp and OpenCode only check that the final result parses as JSON.
+
+#### Timeout and shutdown
+
+All adapters accept `--timeout` from 1 to 5400 seconds (default 1800). One deadline covers
+launch staggering, attempts, backoff and engine execution; recovery never resets it.
+At the deadline, recovery sends SIGINT to the engine process group, allows 30 seconds for
+shutdown and `last.txt` flushing, then sends SIGKILL if needed. omp also receives the remaining
+time through `--max-time`. Admission waiting precedes the deadline.
+Adapter `--stall SEC` is an explicit silence-kill guard, off by default and checked every 30
+seconds; it interrupts and allows 30 seconds before hard-killing the engine group and runner.
+Do not enable it for long quiet tool calls. The independent tool-budget watcher checks every
+2 seconds and allows 2 seconds after SIGINT before killing the engine group and runner.
+Waiter `--stall` is only a QUIET notice threshold, not this guard.
 
 ### 5. Dispatch
 
@@ -162,6 +177,10 @@ Each JSON job may override `engine`; otherwise it inherits `--engine`. Use `--dr
 checking a new jobs file. Starts are staggered behind a machine-wide lock, stdin is closed or
 consumed to EOF, and each adapter records its engine in run metadata. Read the engine page for
 its deadlines, resume semantics, and supported job fields.
+Every adapter resolves path arguments against the invocation directory before changing cwd.
+Bounded recovery keeps the same engine, session, worktree and permissions, and spends only
+the original deadline. Configure model pairs outside the repo; use `--no-recovery` to opt out.
+Classification, limits and attempt evidence: [troubleshooting](references/troubleshooting.md#rate-limits-or-auth-failures).
 
 ### 6. Supervise without idling
 
@@ -170,9 +189,12 @@ its deadlines, resume semantics, and supported job fields.
 ```
 
 Exit 0 means agents changed state; 1 means the window is free for work that needs no agent; 2
-means the run is finished; 3 means nothing was dispatched. Liveness comes from the event log's
-mtime and final 4 KB. `EXPIRING` and `QUIET` warn before guards fire. Correct a running worker
-with `note.sh`, which its spec tells it to re-read.
+means the run is finished; 3 means nothing was dispatched. Missing-completion `STALLED` means
+the recorded process is gone without `meta.json` or a final result, after 5 seconds of observed
+absence for wrapper finalisation. A live PID with no event growth produces non-terminal `QUIET`
+after waiter `--stall SEC` (default 300); each quiet state is reported once. `wait.sh` keeps
+waiting and reports the real completion later. `EXPIRING` remains active during quiet and
+finalisation states. Correct a running worker with `note.sh`, which its spec tells it to re-read.
 
 When watch prints `REFLECT`, run the shown `reflect.sh` command once; it is a reminder,
 not a pause. The three verdicts and what each asks of you: [references/reflect.md](references/reflect.md).
@@ -210,20 +232,23 @@ cost where available. Follow [references/review-gate.md](references/review-gate.
 ```
 
 Resume only with the same engine. Continue when the thread holds expensive, correct context;
-start fresh when context is small, reconstructible, or based on a failed assumption. Report a
-transport failure with its evidence rather than silently retrying it.
+start fresh when context is small, reconstructible, or based on a failed assumption. Automatic
+recovery covers only classified service failures; auth and task failures require your decision.
 
 ### 9. Integrate, then ship
 
 ```sh
 "$DISPATCH_SKILL/scripts/merge.sh" --run-dir "$RUN" --repo /path/to/repo --into main \
-  --check "pytest -q" --rebase
+  --final-check "pytest -q" --rebase
 ```
 
-Integration is atomic per branch and for the run. Any conflict, failed rebase, or failed check
-returns the target to the commit where the run started. Run the full suite here. Check drift
-first with `worktrees.sh "$RUN" --drift main`. You perform every irreversible step and confirm
-with the user before anything outward-facing.
+Follow the [worker contract](references/review-gate.md#worker-contract) for Git ownership, artifact scope, targeted checks and `not run`.
+`merge.sh` stages tracked output and literal `--include label:path` files, verifies the commit,
+then integrates. If untracked files exist and none are selected, it lists them and fails;
+use explicit `--ignore-untracked` to leave them all out. `--artifact-check` applies repository policy.
+Conflict, failed rebase or failed check rolls the target back; worker commits remain for review.
+Check drift with `worktrees.sh "$RUN" --drift main`. Publishing is opt-in with `--push REMOTE`;
+it requires checks and verifies the exact remote head. Get user approval before external actions.
 
 ## Common task shapes
 

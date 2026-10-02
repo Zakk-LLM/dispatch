@@ -17,8 +17,8 @@ stronger than a permission rule that says no.
 **Sessions inside the run.** `--session-dir` puts every session file in `<run>/sessions/`, so a
 run directory is self-contained and a resume needs no global state.
 
-**A built-in deadline.** `--max-time` stops the session cleanly from the inside; the external
-`timeout` is only the backstop for a hang.
+The internal `--max-time` limit stops a session cleanly. The shared recovery runner also
+enforces the original job deadline across attempts, including backoff.
 
 **Roles as files.** `--role <name>` appends an agent definition from `~/.omp/agent/agents/` to
 the system prompt, so a worker persona lives in one reusable file.
@@ -50,9 +50,8 @@ worker that must *search* needs `--permission full`, where MCP search tools are 
 | `frontier` | `xhigh` | architecture, concurrency, performance, vague requirements | 3600–5400 |
 | `max` | `max` | one problem a `frontier` agent already failed twice | 3600–5400 |
 
-The `7200+` bands above are history: nothing runs past 5400.
-
-**Hard ceiling: 5400 seconds (90 minutes) for any worker.** A worker still running past that is treated as suspect, non-essential work — repeated full gate runs, ablation of every hunk, a sixth version of the report — and is killed on sight, not waited for; every extra round re-reads the whole context and burns tokens by the hour. You finish from what is in its worktree: commit by theme, push, let CI be the gate. Cap the verification in the spec itself: one full gate run, two or three ablations of the hunks that matter, one report, and the sentence "do not repeat a full round".
+See [timeout and shutdown](../../SKILL.md#timeout-and-shutdown) for the 5400-second ceiling and guards.
+Follow the [worker contract](../review-gate.md#worker-contract) for Git ownership, artifact scope, targeted checks and `not run`.
 
 
 A tier always sets the thinking level, and sets the model when `OMP_TIER_<TIER>_MODEL` is bound.
@@ -83,6 +82,12 @@ headroom — the fallback is a weaker bench, not a co-equal. When the fallback s
 which providers are primary and fallback, and the exact fractions, are data in the env, not
 names here.
 
+Explicit `--model provider/model` bypasses tier quota routing. For a configured mirror, use
+`--model codex-relay/gpt-6.1-sol` or `--model codex-relay/gpt-6-astra`; the relay has no luna.
+Runtime fallback pairs belong in the machine-local env file, not this routing table.
+See [shared recovery](../troubleshooting.md#rate-limits-or-auth-failures) for bounded same-session
+recovery after a quota or transient failure, preserved deadlines and the opt-out flag.
+
 What does not change: a read-only worker's bill is almost all input, so the cheapest model at
 low thinking is right for most of a run, and promoting a task is a decision rather than a
 default.
@@ -97,6 +102,7 @@ default.
 Every profile runs with approvals disabled, because a print-mode run has nobody to answer a
 prompt and would sit until the deadline. That is exactly why the allowlist, not an approval
 rule, is the boundary.
+See the [worker contract](../review-gate.md#worker-contract) for Git ownership and artifact scope.
 
 These profile names are omp's own. `read-only` here is a tool allowlist, not codex's kernel
 sandbox, and omp has no `inspect` profile like opencode's — so an audit that must run tests or

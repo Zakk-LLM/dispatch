@@ -40,7 +40,8 @@ model is asked, not forced, so a schema failure is a real outcome you will occas
 | `frontier` | `xhigh` | architecture, concurrency, performance, vague requirements | 3600–5400 |
 | `max` | `max` | one problem a `frontier` agent already failed twice; never a default | 3600–5400 |
 
-**Hard ceiling: 5400 seconds (90 minutes) for any worker.** A worker still running past that is treated as suspect, non-essential work — repeated full gate runs, ablation of every hunk, a sixth version of the report — and is killed on sight, not waited for; every extra round re-reads the whole context and burns tokens by the hour. You finish from what is in its worktree: commit by theme, push, let CI be the gate. Cap the verification in the spec itself: one full gate run, two or three ablations of the hunks that matter, one report, and the sentence "do not repeat a full round".
+See [timeout and shutdown](../../SKILL.md#timeout-and-shutdown) for the 5400-second ceiling and guards.
+Follow the [worker contract](../review-gate.md#worker-contract) for Git ownership, artifact scope, targeted checks and `not run`.
 
 
 A tier always sets the variant, and sets the model only when `OPENCODE_TIER_<TIER>_MODEL` is
@@ -60,7 +61,7 @@ temperature, tools, permissions — in one name.
 | `inspect` (default) | `build` | every command except destructive and history-changing git; the edit tool is denied | audits, reviews, running tests and linters |
 | `workspace-write` | `build` | the same commands, plus editing | all implementation |
 | `full` | `build` | everything except history-changing git | rare, and only with the user's approval |
-| `bypass` | `build` | everything, git included, plus `--auto` | a workspace you would hand a shell to |
+| `bypass` | `build` | full profile plus `--auto`; Git writes remain prohibited | a workspace you would hand a shell to |
 
 Pick by what the task must *do*, not by how cautious it sounds. The mistake this table exists to
 prevent: an auditor dispatched `read-only` cannot run the tests it is judging by, and the run is
@@ -87,9 +88,9 @@ to ask, and either one would stop a non-interactive run dead until the timeout; 
 them — `doom_loop` denied so a suspected runaway stops, `external_directory` allowed so a spec
 can point a worker at a skill file outside the workspace.
 
-`--network` allows webfetch, which is denied by default in every profile. `--allow-git` removes
-the git denials and needs a reason. **Never configure `ask` in a profile** — a non-interactive
-run has nobody to answer it and will sit until the timeout kills it.
+`--network` allows webfetch, denied by default; there is no `--allow-git` escape.
+See the [worker contract](../review-gate.md#worker-contract) for Git and artifact boundaries.
+Do not configure `ask` in a non-interactive profile.
 
 `--timeout` is a runaway guard: estimate the work, then roughly triple it. `--stall` interrupts a
 worker that has emitted no event for that long.
@@ -104,23 +105,16 @@ redirects stdin from `/dev/null`; without that the process sits with no output u
 killed — measured at four minutes of nothing before a timeout, against seconds for the same
 prompt with stdin closed.
 
-`opencode run` also has no internal time limit, so every invocation is wrapped in `timeout`.
-Exit code 124 or 137 means the wrapper killed it; `meta.json` reports `timed_out: true`, or
-`stalled: true` when `--stall` fired instead.
+`opencode run` has no internal time limit. The shared runner enforces the original job deadline
+across attempts. Exit 124 or 137 records `timed_out: true` in `meta.json`, or `stalled: true`
+when `--stall` fired instead.
 
 A repeated timeout is a decomposition problem, not a timeout-value problem.
 
 ## `database is locked` when several agents start at once
 
-opencode keeps session state in SQLite, and four processes reaching it in the same instant lose
-to a busy database. `oc_agent.sh` serializes launches machine-wide behind a short hold
-(`AGENT_START_STAGGER`, default 2 seconds) so a fan-out ramps in, and retries a launch that died
-on a lock with quadratic backoff (`AGENT_LOCK_RETRIES`, default 4). A retry is only attempted
-when the run produced no real events: a lock error happens before the model does anything, so
-repeating it repeats nothing, while retrying a run that had started working would duplicate it.
-Each failed attempt's stderr is kept as `stderr.attempt-<n>.log`.
-
-Verified: four simultaneous dispatches now all reach distinct sessions and exit 0.
+See [shared recovery](../troubleshooting.md#rate-limits-or-auth-failures). The same bounded
+mechanism handles startup locks and service failures without resetting the deadline.
 
 ## The run hangs with no events at all
 
