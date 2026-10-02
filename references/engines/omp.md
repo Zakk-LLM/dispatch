@@ -74,7 +74,7 @@ quota is spent only where the stronger provider earns it. Past the warning fract
 primary provider is at or past `OMP_FALLBACK_AT` (default 0.9) or `limitReached` resolves to its
 fallback binding, with the report cached for two minutes. The graded shift below that threshold
 is your call: resolve the model and thinking per worker and pass them with `--model`/`--thinking`. Prefer the primary while it has
-headroom — the fallback is a weaker bench, not a co-equal. This keeps the file provider-neutral:
+headroom — the fallback is a weaker bench, not a co-equal. When the fallback serves the same models on a pay-per-use upstream, skip the graded shift: raise `OMP_FALLBACK_AT` close to 1 so every tier stays on the subscription until it is nearly spent, then moves at once. This keeps the file provider-neutral:
 which providers are primary and fallback, and the exact fractions, are data in the env, not
 names here.
 
